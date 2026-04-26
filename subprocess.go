@@ -61,17 +61,21 @@ func (s *Subprocess) Signal(sig msg.RunnerSignalType) error {
 // SubprocessRegistry tracks active subprocesses by session ID. Methods are
 // safe for concurrent use.
 type SubprocessRegistry struct {
-	mu       sync.Mutex
-	procs    map[string]*Subprocess
-	outgoing chan<- *msg.RunnerMessage // single shared sink to the WS writer
+	mu        sync.Mutex
+	procs     map[string]*Subprocess
+	outgoing  chan<- *msg.RunnerMessage // single shared sink to the WS writer
+	fetchBin  func(harness msg.Harness) (string, error)
 }
 
 // NewSubprocessRegistry constructs a registry that ships subprocess output
-// onto outgoing.
-func NewSubprocessRegistry(outgoing chan<- *msg.RunnerMessage) *SubprocessRegistry {
+// onto outgoing. fetchBin is invoked when a Spawn request names a harness
+// whose wrapper binary is not on PATH; the returned absolute path is used
+// for the exec. nil disables the fallback (Spawn fails fast).
+func NewSubprocessRegistry(outgoing chan<- *msg.RunnerMessage, fetchBin func(harness msg.Harness) (string, error)) *SubprocessRegistry {
 	return &SubprocessRegistry{
 		procs:    make(map[string]*Subprocess),
 		outgoing: outgoing,
+		fetchBin: fetchBin,
 	}
 }
 
@@ -106,7 +110,18 @@ func (r *SubprocessRegistry) Spawn(sessionID string, spawn *msg.RunnerSpawn) err
 		}
 		resolved, err := exec.LookPath(bin)
 		if err != nil {
-			return fmt.Errorf("binary not found on PATH: %s", bin)
+			// Wrapper binary missing — try to fetch it from the bridge.
+			// Falling back to a local install lets new harnesses light up
+			// on a runner without re-running the installer.
+			if r.fetchBin == nil {
+				return fmt.Errorf("binary not found on PATH: %s (no fetch hook configured)", bin)
+			}
+			fetched, ferr := r.fetchBin(spawn.Harness)
+			if ferr != nil {
+				return fmt.Errorf("binary not found on PATH: %s; auto-fetch failed: %w", bin, ferr)
+			}
+			log.Printf("[runner] fetched missing wrapper %s → %s", bin, fetched)
+			resolved = fetched
 		}
 		binPath = resolved
 	}

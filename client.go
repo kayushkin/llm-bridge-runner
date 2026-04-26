@@ -43,10 +43,13 @@ type Client struct {
 // NewClient constructs a runner client. The returned Client must be Run.
 func NewClient(cfg *Config) *Client {
 	outgoing := make(chan *msg.RunnerMessage, outgoingBuffer)
+	fetch := func(h msg.Harness) (string, error) {
+		return fetchHarnessBinary(cfg.ServerURL, h)
+	}
 	return &Client{
 		cfg:      cfg,
 		outgoing: outgoing,
-		registry: NewSubprocessRegistry(outgoing),
+		registry: NewSubprocessRegistry(outgoing, fetch),
 	}
 }
 
