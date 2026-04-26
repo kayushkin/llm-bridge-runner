@@ -90,7 +90,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 		HandshakeTimeout: dialTimeout,
 	}
 	headers := http.Header{}
-	headers.Set("Authorization", "Bearer "+c.cfg.Token)
+	headers.Set("Authorization", "Bearer "+c.cfg.RunnerToken)
 
 	log.Printf("[runner] dialing %s", wsURL)
 	conn, _, err := dialer.DialContext(ctx, wsURL, headers)
@@ -102,7 +102,6 @@ func (c *Client) runOnce(ctx context.Context) error {
 	hello := &msg.RunnerMessage{
 		Type: msg.RunnerMsgHello,
 		Hello: &msg.RunnerHello{
-			Token:              c.cfg.Token,
 			MachineName:        c.cfg.MachineName,
 			Hostname:           c.cfg.Hostname,
 			OS:                 c.cfg.OS,

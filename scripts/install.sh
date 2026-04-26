@@ -2,51 +2,44 @@
 #
 # llm-bridge-runner install script.
 #
-# Installs the runner binary, writes a systemd user unit, and starts the
-# service. Connection details (server URL, token, machine name) come
-# from flags, env vars, or interactive prompt — in that order.
+# Single-command bootstrap. Prompts for a bridge endpoint and a one-time
+# enrollment passphrase, downloads the runner binary, exchanges the
+# passphrase for a durable per-machine token, and installs a systemd
+# user unit that keeps the runner connected.
+#
+# Endpoint formats:
+#   https://bridge.example.com             public TLS endpoint, no tunnel
+#   http://bridge.internal:8160            direct HTTP, no tunnel
+#   user@host                              SSH tunnel to host's localhost:8160
+#   user@host:9999                         SSH tunnel to host's localhost:9999
+#
+# When the endpoint is an SSH target the script also installs a second
+# systemd unit (llm-bridge-tunnel.service) that keeps an `ssh -NL` tunnel
+# up; the runner service depends on it.
 #
 # Usage:
-#   curl -fsSL https://your-bridge-server/install.sh | bash
-#   curl -fsSL <url>/install.sh | bash -s -- --server URL --token TOKEN --name LABEL
-#   LLMBRIDGE_SERVER=… LLMBRIDGE_TOKEN=… LLMBRIDGE_MACHINE_NAME=… curl … | bash
-#
-# The script never echoes the token to the terminal or to logs.
+#   curl -fsSL <bridge-url>/api/runner/install.sh | bash
+#   curl -fsSL <bridge-url>/api/runner/install.sh | bash -s -- --endpoint URL --passphrase XXXX
 
 set -euo pipefail
 
-# Pre-baked default — when the script is served by an llm-bridge-server
-# instance, that server templates this line with its own URL. Direct
-# downloads from the source repo leave it empty so the prompt asks.
-LLMBRIDGE_SERVER_DEFAULT="${LLMBRIDGE_SERVER:-}"
-
-# Where the prebuilt runner binary lives. When the script is served by
-# an llm-bridge-server, this is the absolute URL of /api/runner/binary
-# for the matching OS+arch. Empty disables the download path; the
-# script then falls back to `go install`.
-RUNNER_BINARY_URL_DEFAULT="${LLMBRIDGE_RUNNER_BINARY_URL:-}"
-
-# ──────────────────────────────────────────────────────────────────────
-# Argument parsing
-# ──────────────────────────────────────────────────────────────────────
-
-server="${LLMBRIDGE_SERVER:-$LLMBRIDGE_SERVER_DEFAULT}"
-token="${LLMBRIDGE_TOKEN:-}"
+endpoint="${LLMBRIDGE_ENDPOINT:-${LLMBRIDGE_SERVER:-}}"
+passphrase="${LLMBRIDGE_PASSPHRASE:-}"
 machine_name="${LLMBRIDGE_MACHINE_NAME:-}"
-working_dir="${LLMBRIDGE_WORKING_DIR:-}"
-binary_url="${LLMBRIDGE_RUNNER_BINARY_URL:-$RUNNER_BINARY_URL_DEFAULT}"
+binary_url="${LLMBRIDGE_RUNNER_BINARY_URL:-}"
+local_port="${LLMBRIDGE_LOCAL_PORT:-8160}"
 non_interactive=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --server)        server="$2"; shift 2 ;;
-    --token)         token="$2"; shift 2 ;;
-    --name)          machine_name="$2"; shift 2 ;;
-    --workdir)       working_dir="$2"; shift 2 ;;
-    --binary-url)    binary_url="$2"; shift 2 ;;
-    --yes|-y)        non_interactive=1; shift ;;
+    --endpoint|--server)  endpoint="$2"; shift 2 ;;
+    --passphrase)         passphrase="$2"; shift 2 ;;
+    --name)               machine_name="$2"; shift 2 ;;
+    --binary-url)         binary_url="$2"; shift 2 ;;
+    --local-port)         local_port="$2"; shift 2 ;;
+    --yes|-y)             non_interactive=1; shift ;;
     -h|--help)
-      sed -n '2,15p' "$0"; exit 0 ;;
+      sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -76,13 +69,12 @@ home_dir="${HOME:-$(getent passwd "$run_user" | cut -d: -f6)}"
 # ──────────────────────────────────────────────────────────────────────
 
 prompt_value() {
-  # $1 = label, $2 = current value, $3 = "secret" if input should be hidden
   local label="$1" current="$2" secret="${3:-}" value
   if [[ -n "$current" ]]; then
     echo "$current"
     return
   fi
-  if [[ ! -t 0 ]] && [[ ! -e /dev/tty ]]; then
+  if [[ ! -e /dev/tty ]]; then
     echo "missing required value: $label (no tty available for prompt)" >&2
     exit 2
   fi
@@ -98,26 +90,53 @@ prompt_value() {
 }
 
 if [[ "$non_interactive" -eq 1 ]]; then
-  for var in server token machine_name; do
+  for var in endpoint passphrase; do
     if [[ -z "${!var}" ]]; then
       echo "missing required value in non-interactive mode: --$var" >&2
       exit 2
     fi
   done
 else
-  server="$(prompt_value "llm-bridge-server URL" "$server")"
-  token="$(prompt_value "runner token" "$token" secret)"
+  endpoint="$(prompt_value "bridge endpoint (URL or user@host)" "$endpoint")"
+  passphrase="$(prompt_value "enrollment passphrase" "$passphrase" secret)"
   default_name="$(hostname -s 2>/dev/null || hostname)"
   if [[ "$is_wsl" -eq 1 ]]; then
     default_name="wsl-${default_name}"
   fi
-  machine_name="${machine_name:-$default_name}"
-  machine_name="$(prompt_value "machine label [$machine_name]" "" )"
-  machine_name="${machine_name:-$default_name}"
+  if [[ -z "$machine_name" ]]; then
+    typed="$(prompt_value "machine label [$default_name]" "")"
+    machine_name="${typed:-$default_name}"
+  fi
 fi
 
-if [[ -z "$server" || -z "$token" || -z "$machine_name" ]]; then
-  echo "server URL, token, and machine name are all required" >&2
+if [[ -z "$endpoint" || -z "$passphrase" ]]; then
+  echo "endpoint and passphrase are required" >&2
+  exit 2
+fi
+
+# ──────────────────────────────────────────────────────────────────────
+# Endpoint parsing — URL vs SSH target
+# ──────────────────────────────────────────────────────────────────────
+
+needs_tunnel=0
+ssh_target=""
+ssh_remote_port=8160
+
+if [[ "$endpoint" =~ ^https?:// ]] || [[ "$endpoint" =~ ^wss?:// ]]; then
+  # Direct URL — no tunnel.
+  bridge_url="$endpoint"
+elif [[ "$endpoint" =~ ^([^@]+@)?([A-Za-z0-9.-]+)(:([0-9]+))?$ ]]; then
+  # SSH target. Optional :port specifies the *bridge* port on the remote
+  # host (default 8160). The local port is configurable via --local-port.
+  ssh_target="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+  if [[ -n "${BASH_REMATCH[4]}" ]]; then
+    ssh_remote_port="${BASH_REMATCH[4]}"
+  fi
+  needs_tunnel=1
+  bridge_url="http://localhost:${local_port}"
+else
+  echo "unrecognized endpoint format: $endpoint" >&2
+  echo "  expected https://host or http://host:port or user@host[:port]" >&2
   exit 2
 fi
 
@@ -131,76 +150,142 @@ if ! command -v claude >/dev/null 2>&1; then
   echo "         (continuing — you can install it later)" >&2
 fi
 
+if [[ "$needs_tunnel" -eq 1 ]]; then
+  if ! command -v ssh >/dev/null 2>&1; then
+    echo "error: ssh client is required for tunneling endpoint $endpoint" >&2
+    exit 1
+  fi
+  echo "ssh tunnel: localhost:${local_port} → ${ssh_target}:${ssh_remote_port}"
+fi
+
 # ──────────────────────────────────────────────────────────────────────
-# Install the binary
+# Open install-time SSH tunnel (if needed)
+# ──────────────────────────────────────────────────────────────────────
+
+tunnel_pid=""
+cleanup_install_tunnel() {
+  if [[ -n "$tunnel_pid" ]]; then
+    kill "$tunnel_pid" 2>/dev/null || true
+  fi
+}
+trap cleanup_install_tunnel EXIT
+
+if [[ "$needs_tunnel" -eq 1 ]]; then
+  # Refuse if something is already listening on the chosen local port —
+  # silently overlapping ports has caused enough debug pain.
+  if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${local_port}\$"; then
+    echo "error: localhost:${local_port} is already in use; pass --local-port N to pick a free one" >&2
+    exit 1
+  fi
+  ssh -fN \
+    -L "${local_port}:localhost:${ssh_remote_port}" \
+    -o BatchMode=yes \
+    -o ExitOnForwardFailure=yes \
+    -o StrictHostKeyChecking=accept-new \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    "$ssh_target"
+  # `ssh -fN` daemonizes; find the process so we can clean it up at exit.
+  tunnel_pid="$(pgrep -nu "$run_user" -f "ssh -fN -L ${local_port}:localhost:${ssh_remote_port} .* ${ssh_target}" || true)"
+  # Give it a beat to bind.
+  for _ in 1 2 3 4 5; do
+    if curl -fsS -o /dev/null --max-time 2 "${bridge_url}/health"; then
+      break
+    fi
+    sleep 1
+  done
+fi
+
+# Sanity check: the bridge URL must respond.
+if ! curl -fsS -o /dev/null --max-time 5 "${bridge_url}/health"; then
+  echo "error: cannot reach bridge at ${bridge_url}" >&2
+  exit 1
+fi
+
+# ──────────────────────────────────────────────────────────────────────
+# Install the runner binary
 # ──────────────────────────────────────────────────────────────────────
 
 bin_dir="$home_dir/.local/bin"
 mkdir -p "$bin_dir"
 runner_bin="$bin_dir/llm-bridge-runner"
 
-if [[ -n "$binary_url" ]]; then
-  echo "downloading llm-bridge-runner from $binary_url"
-  tmp="$(mktemp)"
-  curl -fsSL "$binary_url" -o "$tmp"
-  chmod +x "$tmp"
-  mv "$tmp" "$runner_bin"
-elif command -v go >/dev/null 2>&1; then
-  echo "no --binary-url provided; building from source via 'go install'"
-  GOBIN="$bin_dir" go install github.com/kayushkin/llm-bridge-runner@latest
-else
-  echo "error: neither --binary-url nor 'go' is available; cannot install runner" >&2
+if [[ -z "$binary_url" ]]; then
+  binary_url="${bridge_url%/}/api/runner/binary?os=${os}&arch=${arch}"
+fi
+echo "downloading llm-bridge-runner from ${binary_url}"
+tmp="$(mktemp)"
+if ! curl -fsSL "$binary_url" -o "$tmp"; then
+  echo "error: download failed from $binary_url" >&2
   exit 1
 fi
-
-if [[ ! -x "$runner_bin" ]]; then
-  echo "install failed: $runner_bin is missing or not executable" >&2
-  exit 1
-fi
-
+chmod +x "$tmp"
+mv "$tmp" "$runner_bin"
 echo "installed $runner_bin"
-"$runner_bin" -version || true
 
 # ──────────────────────────────────────────────────────────────────────
-# Configure systemd user unit
+# Enroll: trade the passphrase for a durable runner token
+# ──────────────────────────────────────────────────────────────────────
+
+echo "enrolling with ${bridge_url} ..."
+"$runner_bin" enroll --server "$bridge_url" --passphrase "$passphrase" --name "$machine_name"
+unset passphrase
+
+# ──────────────────────────────────────────────────────────────────────
+# Configure systemd user units
 # ──────────────────────────────────────────────────────────────────────
 
 if [[ "$os" != "linux" ]]; then
-  echo "non-linux OS: systemd setup skipped. Run manually: $runner_bin -server '$server' -token <TOKEN> -name '$machine_name'"
+  if [[ "$needs_tunnel" -eq 1 ]]; then
+    echo "non-linux OS: install a tunnel manager yourself, then run: $runner_bin"
+  else
+    echo "non-linux OS: run: $runner_bin"
+  fi
   exit 0
 fi
 
 if ! command -v systemctl >/dev/null 2>&1; then
-  echo "systemctl not found; cannot install service. Run the runner manually." >&2
+  echo "systemctl not found; service install skipped. Run manually: $runner_bin run" >&2
   exit 0
 fi
 
 unit_dir="$home_dir/.config/systemd/user"
 mkdir -p "$unit_dir"
-unit_file="$unit_dir/llm-bridge-runner.service"
 
-env_file="$home_dir/.config/llm-bridge-runner/env"
-mkdir -p "$(dirname "$env_file")"
-umask_prev="$(umask)"
-umask 077
-cat >"$env_file" <<EOF
-LLMBRIDGE_SERVER=$server
-LLMBRIDGE_TOKEN=$token
-LLMBRIDGE_MACHINE_NAME=$machine_name
-LLMBRIDGE_WORKING_DIR=${working_dir}
-EOF
-umask "$umask_prev"
-
-cat >"$unit_file" <<EOF
+# Persistent tunnel unit (only when needed). Restart=always plus the SSH
+# keepalive options keep the link healthy across network blips.
+runner_after="network-online.target"
+runner_requires=""
+if [[ "$needs_tunnel" -eq 1 ]]; then
+  cat >"$unit_dir/llm-bridge-tunnel.service" <<EOF
 [Unit]
-Description=llm-bridge-runner ($machine_name)
+Description=SSH tunnel to llm-bridge-server (${ssh_target}:${ssh_remote_port})
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-EnvironmentFile=$env_file
-ExecStart=$runner_bin
+ExecStart=/usr/bin/env ssh -NL ${local_port}:localhost:${ssh_remote_port} -o BatchMode=yes -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=3 ${ssh_target}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+  runner_after="${runner_after} llm-bridge-tunnel.service"
+  runner_requires="Requires=llm-bridge-tunnel.service"
+fi
+
+cat >"$unit_dir/llm-bridge-runner.service" <<EOF
+[Unit]
+Description=llm-bridge-runner (${machine_name})
+After=${runner_after}
+Wants=network-online.target
+${runner_requires}
+
+[Service]
+Type=simple
+ExecStart=${runner_bin} run
 Restart=always
 RestartSec=5
 
@@ -209,11 +294,21 @@ WantedBy=default.target
 EOF
 
 systemctl --user daemon-reload
+if [[ "$needs_tunnel" -eq 1 ]]; then
+  systemctl --user enable --now llm-bridge-tunnel.service
+fi
+# The install-time tunnel and the systemd-managed tunnel can't both bind
+# the same local port — drop ours before starting the persistent one.
+cleanup_install_tunnel
+trap - EXIT
 systemctl --user enable --now llm-bridge-runner.service
 
 echo
 echo "service started. Tail logs with:"
 echo "  journalctl --user -u llm-bridge-runner -f"
+if [[ "$needs_tunnel" -eq 1 ]]; then
+  echo "  journalctl --user -u llm-bridge-tunnel -f"
+fi
 echo
-echo "To survive logout (keep runner alive after WSL terminal closes):"
+echo "To survive logout (keep the runner alive after terminal closes):"
 echo "  sudo loginctl enable-linger $run_user"
