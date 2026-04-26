@@ -98,6 +98,7 @@ prompt_value() {
 # ──────────────────────────────────────────────────────────────────────
 
 config_file="$home_dir/.config/llm-bridge-runner/config.json"
+tunnel_unit="$home_dir/.config/systemd/user/llm-bridge-tunnel.service"
 update_mode=0
 if [[ -f "$config_file" && "${force_enroll:-0}" -ne 1 ]]; then
   read_field() {
@@ -112,6 +113,20 @@ PY
   }
   saved_endpoint="$(read_field endpoint)"
   saved_machine_name="$(read_field machine_name)"
+  saved_server_url="$(read_field server_url)"
+
+  # Older configs didn't persist endpoint; fall back to the SSH target
+  # in the systemd tunnel unit. Last word on the ExecStart line is the
+  # `user@host[:port]` argument to ssh.
+  if [[ -z "$saved_endpoint" && -f "$tunnel_unit" ]]; then
+    saved_endpoint="$(awk -F= '/^ExecStart=/{print $0; exit}' "$tunnel_unit" | awk '{print $NF}')"
+  fi
+  # And if even that didn't help, but the saved server_url is non-tunneled
+  # (no localhost), use the URL directly — it's a public-bridge install.
+  if [[ -z "$saved_endpoint" && "$saved_server_url" != *localhost* && "$saved_server_url" != *127.0.0.1* ]]; then
+    saved_endpoint="$saved_server_url"
+  fi
+
   if [[ -n "$saved_endpoint" ]]; then
     update_mode=1
     if [[ -z "$endpoint" ]]; then endpoint="$saved_endpoint"; fi
@@ -204,14 +219,16 @@ cleanup_install_tunnel() {
 trap cleanup_install_tunnel EXIT
 
 if [[ "$needs_tunnel" -eq 1 ]]; then
-  # In update mode the persistent llm-bridge-tunnel.service is already
-  # holding $local_port — reuse it instead of competing for the bind.
+  # Whatever's bound to $local_port — reuse it if it actually proxies to
+  # a healthy bridge (typical case: the persistent llm-bridge-tunnel
+  # service is up from a previous install). Otherwise refuse loudly so
+  # we don't silently talk to the wrong service.
   if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${local_port}\$"; then
-    if [[ "$update_mode" -eq 1 ]]; then
+    if curl -fsS -o /dev/null --max-time 3 "${bridge_url}/health"; then
       echo "reusing existing tunnel on localhost:${local_port}"
       needs_install_tunnel=0
     else
-      echo "error: localhost:${local_port} is already in use; pass --local-port N to pick a free one" >&2
+      echo "error: localhost:${local_port} is in use but doesn't proxy to a healthy bridge; pass --local-port N to pick a free one" >&2
       exit 1
     fi
   else
