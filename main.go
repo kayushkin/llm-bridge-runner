@@ -60,6 +60,7 @@ func usage() {
 func enrollCmd(args []string) {
 	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 	server := fs.String("server", os.Getenv("LLMBRIDGE_SERVER"), "llm-bridge-server base URL")
+	endpoint := fs.String("endpoint", os.Getenv("LLMBRIDGE_ENDPOINT"), "original install-time bridge spec (URL or user@host); recorded for idempotent re-install")
 	passphrase := fs.String("passphrase", os.Getenv("LLMBRIDGE_PASSPHRASE"), "single-use enrollment passphrase from `llm-bridge-server mint-enroll`")
 	name := fs.String("name", os.Getenv("LLMBRIDGE_MACHINE_NAME"), "machine label (defaults to hostname)")
 	if err := fs.Parse(args); err != nil {
@@ -70,7 +71,7 @@ func enrollCmd(args []string) {
 		fs.PrintDefaults()
 		os.Exit(2)
 	}
-	cfg, err := Enroll(*server, *passphrase, *name)
+	cfg, err := Enroll(*server, *passphrase, *name, *endpoint)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "enrollment failed: %v\n", err)
 		os.Exit(1)

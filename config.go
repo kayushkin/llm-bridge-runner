@@ -12,8 +12,13 @@ import (
 // SavedConfig is the on-disk runner state — written by `enroll` and read
 // by every subsequent runner start. The runner_token is the long-lived
 // per-machine bearer used in WS Authorization.
+//
+// Endpoint preserves the original install-time bridge spec (URL or
+// user@host SSH target) so the installer can re-derive the correct
+// systemd unit shape on update without re-prompting the user.
 type SavedConfig struct {
 	ServerURL   string `json:"server_url"`
+	Endpoint    string `json:"endpoint,omitempty"`
 	MachineID   string `json:"machine_id"`
 	MachineName string `json:"machine_name"`
 	RunnerToken string `json:"runner_token"` // sensitive; file mode 0600

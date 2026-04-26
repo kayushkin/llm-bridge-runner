@@ -19,7 +19,11 @@ import (
 // Enroll performs the one-time enrollment flow against an llm-bridge-server,
 // trading a single-use passphrase for a durable per-machine runner token.
 // On success it writes a SavedConfig to disk and returns it.
-func Enroll(serverURL, passphrase, machineName string) (*SavedConfig, error) {
+//
+// endpoint is the user-supplied install-time bridge spec (URL or
+// user@host); persisted alongside server_url so the installer can re-run
+// idempotently on update without re-prompting.
+func Enroll(serverURL, passphrase, machineName, endpoint string) (*SavedConfig, error) {
 	if serverURL == "" {
 		return nil, fmt.Errorf("server URL is required")
 	}
@@ -43,7 +47,7 @@ func Enroll(serverURL, passphrase, machineName string) (*SavedConfig, error) {
 		workdir = u.HomeDir
 	}
 
-	endpoint, err := buildEnrollURL(serverURL)
+	enrollURL, err := buildEnrollURL(serverURL)
 	if err != nil {
 		return nil, err
 	}
@@ -65,9 +69,9 @@ func Enroll(serverURL, passphrase, machineName string) (*SavedConfig, error) {
 	}
 
 	httpClient := &http.Client{Timeout: 30 * time.Second}
-	resp, err := httpClient.Post(endpoint, "application/json", bytes.NewReader(body))
+	resp, err := httpClient.Post(enrollURL, "application/json", bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("POST %s: %w", endpoint, err)
+		return nil, fmt.Errorf("POST %s: %w", enrollURL, err)
 	}
 	defer resp.Body.Close()
 
@@ -86,6 +90,7 @@ func Enroll(serverURL, passphrase, machineName string) (*SavedConfig, error) {
 
 	cfg := &SavedConfig{
 		ServerURL:   serverURL,
+		Endpoint:    endpoint,
 		MachineID:   er.MachineID,
 		MachineName: er.MachineName,
 		RunnerToken: er.RunnerToken,

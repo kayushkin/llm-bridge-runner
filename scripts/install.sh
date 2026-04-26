@@ -89,29 +89,62 @@ prompt_value() {
   echo "$value"
 }
 
-if [[ "$non_interactive" -eq 1 ]]; then
-  for var in endpoint passphrase; do
-    if [[ -z "${!var}" ]]; then
-      echo "missing required value in non-interactive mode: --$var" >&2
-      exit 2
-    fi
-  done
-else
-  endpoint="$(prompt_value "bridge endpoint (URL or user@host)" "$endpoint")"
-  passphrase="$(prompt_value "enrollment passphrase" "$passphrase" secret)"
-  default_name="$(hostname -s 2>/dev/null || hostname)"
-  if [[ "$is_wsl" -eq 1 ]]; then
-    default_name="wsl-${default_name}"
-  fi
-  if [[ -z "$machine_name" ]]; then
-    typed="$(prompt_value "machine label [$default_name]" "")"
-    machine_name="${typed:-$default_name}"
+# ──────────────────────────────────────────────────────────────────────
+# Update mode: re-run on a host that's already enrolled
+#
+# When the saved config exists, treat this invocation as an update —
+# refresh the runner binary and restart the service without re-prompting
+# for a fresh passphrase. Re-enrollment requires --force-enroll.
+# ──────────────────────────────────────────────────────────────────────
+
+config_file="$home_dir/.config/llm-bridge-runner/config.json"
+update_mode=0
+if [[ -f "$config_file" && "${force_enroll:-0}" -ne 1 ]]; then
+  read_field() {
+    python3 - "$config_file" "$1" <<'PY' 2>/dev/null || true
+import json, sys
+path, key = sys.argv[1], sys.argv[2]
+try:
+  print(json.load(open(path)).get(key, ''))
+except Exception:
+  pass
+PY
+  }
+  saved_endpoint="$(read_field endpoint)"
+  saved_machine_name="$(read_field machine_name)"
+  if [[ -n "$saved_endpoint" ]]; then
+    update_mode=1
+    if [[ -z "$endpoint" ]]; then endpoint="$saved_endpoint"; fi
+    if [[ -z "$machine_name" && -n "$saved_machine_name" ]]; then machine_name="$saved_machine_name"; fi
+    echo "found existing install for ${saved_machine_name:-this host} — updating in place"
   fi
 fi
 
-if [[ -z "$endpoint" || -z "$passphrase" ]]; then
-  echo "endpoint and passphrase are required" >&2
-  exit 2
+if [[ "$update_mode" -ne 1 ]]; then
+  if [[ "$non_interactive" -eq 1 ]]; then
+    for var in endpoint passphrase; do
+      if [[ -z "${!var}" ]]; then
+        echo "missing required value in non-interactive mode: --$var" >&2
+        exit 2
+      fi
+    done
+  else
+    endpoint="$(prompt_value "bridge endpoint (URL or user@host)" "$endpoint")"
+    passphrase="$(prompt_value "enrollment passphrase" "$passphrase" secret)"
+    default_name="$(hostname -s 2>/dev/null || hostname)"
+    if [[ "$is_wsl" -eq 1 ]]; then
+      default_name="wsl-${default_name}"
+    fi
+    if [[ -z "$machine_name" ]]; then
+      typed="$(prompt_value "machine label [$default_name]" "")"
+      machine_name="${typed:-$default_name}"
+    fi
+  fi
+
+  if [[ -z "$endpoint" || -z "$passphrase" ]]; then
+    echo "endpoint and passphrase are required" >&2
+    exit 2
+  fi
 fi
 
 # ──────────────────────────────────────────────────────────────────────
@@ -171,12 +204,22 @@ cleanup_install_tunnel() {
 trap cleanup_install_tunnel EXIT
 
 if [[ "$needs_tunnel" -eq 1 ]]; then
-  # Refuse if something is already listening on the chosen local port —
-  # silently overlapping ports has caused enough debug pain.
+  # In update mode the persistent llm-bridge-tunnel.service is already
+  # holding $local_port — reuse it instead of competing for the bind.
   if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${local_port}\$"; then
-    echo "error: localhost:${local_port} is already in use; pass --local-port N to pick a free one" >&2
-    exit 1
+    if [[ "$update_mode" -eq 1 ]]; then
+      echo "reusing existing tunnel on localhost:${local_port}"
+      needs_install_tunnel=0
+    else
+      echo "error: localhost:${local_port} is already in use; pass --local-port N to pick a free one" >&2
+      exit 1
+    fi
+  else
+    needs_install_tunnel=1
   fi
+fi
+
+if [[ "${needs_install_tunnel:-0}" -eq 1 ]]; then
   ssh -fN \
     -L "${local_port}:localhost:${ssh_remote_port}" \
     -o BatchMode=yes \
@@ -203,7 +246,7 @@ if ! curl -fsS -o /dev/null --max-time 5 "${bridge_url}/health"; then
 fi
 
 # ──────────────────────────────────────────────────────────────────────
-# Install the runner binary
+# Install the runner binary (download is always idempotent)
 # ──────────────────────────────────────────────────────────────────────
 
 bin_dir="$home_dir/.local/bin"
@@ -213,6 +256,17 @@ runner_bin="$bin_dir/llm-bridge-runner"
 if [[ -z "$binary_url" ]]; then
   binary_url="${bridge_url%/}/api/runner/binary?os=${os}&arch=${arch}"
 fi
+
+# Stop the running service before clobbering its binary. Otherwise the
+# rename below races and ELF reload can leave a half-running daemon.
+service_was_active=0
+if [[ "$update_mode" -eq 1 ]] && command -v systemctl >/dev/null 2>&1; then
+  if systemctl --user is-active --quiet llm-bridge-runner.service; then
+    systemctl --user stop llm-bridge-runner.service || true
+    service_was_active=1
+  fi
+fi
+
 echo "downloading llm-bridge-runner from ${binary_url}"
 tmp="$(mktemp)"
 if ! curl -fsSL "$binary_url" -o "$tmp"; then
@@ -225,11 +279,14 @@ echo "installed $runner_bin"
 
 # ──────────────────────────────────────────────────────────────────────
 # Enroll: trade the passphrase for a durable runner token
+# (skipped on update — existing token is reused)
 # ──────────────────────────────────────────────────────────────────────
 
-echo "enrolling with ${bridge_url} ..."
-"$runner_bin" enroll --server "$bridge_url" --passphrase "$passphrase" --name "$machine_name"
-unset passphrase
+if [[ "$update_mode" -ne 1 ]]; then
+  echo "enrolling with ${bridge_url} ..."
+  "$runner_bin" enroll --server "$bridge_url" --passphrase "$passphrase" --name "$machine_name" --endpoint "$endpoint"
+  unset passphrase
+fi
 
 # ──────────────────────────────────────────────────────────────────────
 # Configure systemd user units
