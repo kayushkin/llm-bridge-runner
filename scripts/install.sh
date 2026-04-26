@@ -350,6 +350,13 @@ EOF
   runner_requires="Requires=llm-bridge-tunnel.service"
 fi
 
+# Capture the user's interactive PATH so harnesses spawned by the runner
+# can find tools installed under nvm/npm-global/cargo/etc. Without this,
+# systemd user services get a minimal default PATH and `claude`,
+# `node`, `npm`, … come back ENOENT even though `which claude` works in
+# the shell. Same pattern llm-bridge.service uses on the host side.
+runner_path="$(echo "$PATH" | tr ':' '\n' | awk '!seen[$0]++' | paste -sd:)"
+
 cat >"$unit_dir/llm-bridge-runner.service" <<EOF
 [Unit]
 Description=llm-bridge-runner (${machine_name})
@@ -359,6 +366,8 @@ ${runner_requires}
 
 [Service]
 Type=simple
+Environment=PATH=${runner_path}
+Environment=HOME=${home_dir}
 ExecStart=${runner_bin} run
 Restart=always
 RestartSec=5
