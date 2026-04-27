@@ -203,14 +203,21 @@ func (c *Client) reader(conn *websocket.Conn) error {
 				log.Printf("[runner] invalid spawn: missing fields")
 				continue
 			}
-			if err := c.registry.Spawn(m.SessionID, m.Spawn); err != nil {
-				log.Printf("[runner] spawn failed (session=%s): %v", m.SessionID, err)
-				c.outgoing <- &msg.RunnerMessage{
-					Type:      msg.RunnerMsgExit,
-					SessionID: m.SessionID,
-					Exit:      &msg.RunnerExit{ExitCode: -1, Error: err.Error()},
+			// Spawn off the read loop. Provisioning service-style backends
+			// can take tens of seconds (downloading the binary, waiting
+			// for health), and blocking the reader starves WS pongs —
+			// the connection then dies on the server-side read deadline
+			// before we can finish setup.
+			go func(sessionID string, spawn *msg.RunnerSpawn) {
+				if err := c.registry.Spawn(sessionID, spawn); err != nil {
+					log.Printf("[runner] spawn failed (session=%s): %v", sessionID, err)
+					c.outgoing <- &msg.RunnerMessage{
+						Type:      msg.RunnerMsgExit,
+						SessionID: sessionID,
+						Exit:      &msg.RunnerExit{ExitCode: -1, Error: err.Error()},
+					}
 				}
-			}
+			}(m.SessionID, m.Spawn)
 		case msg.RunnerMsgStdin:
 			if m.Stdin == nil || m.SessionID == "" {
 				continue
