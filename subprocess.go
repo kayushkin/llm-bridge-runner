@@ -65,17 +65,28 @@ type SubprocessRegistry struct {
 	procs     map[string]*Subprocess
 	outgoing  chan<- *msg.RunnerMessage // single shared sink to the WS writer
 	fetchBin  func(harness msg.Harness) (string, error)
+	serverURL string // propagated to subprocesses as LLMBRIDGE_SERVER
+	services  *ServiceRegistry
 }
 
 // NewSubprocessRegistry constructs a registry that ships subprocess output
 // onto outgoing. fetchBin is invoked when a Spawn request names a harness
 // whose wrapper binary is not on PATH; the returned absolute path is used
 // for the exec. nil disables the fallback (Spawn fails fast).
-func NewSubprocessRegistry(outgoing chan<- *msg.RunnerMessage, fetchBin func(harness msg.Harness) (string, error)) *SubprocessRegistry {
+//
+// services owns long-lived backend daemons declared in spawn manifests
+// (e.g. inber-server). Provided at construction so Spawn can ensure
+// those backends are running before forking the wrapper.
+//
+// serverURL is exported to every spawned subprocess as LLMBRIDGE_SERVER so
+// wrappers can refer back to the bridge for any side-channel needs.
+func NewSubprocessRegistry(outgoing chan<- *msg.RunnerMessage, fetchBin func(harness msg.Harness) (string, error), serverURL string, services *ServiceRegistry) *SubprocessRegistry {
 	return &SubprocessRegistry{
-		procs:    make(map[string]*Subprocess),
-		outgoing: outgoing,
-		fetchBin: fetchBin,
+		procs:     make(map[string]*Subprocess),
+		outgoing:  outgoing,
+		fetchBin:  fetchBin,
+		serverURL: serverURL,
+		services:  services,
 	}
 }
 
@@ -101,6 +112,17 @@ func (r *SubprocessRegistry) Spawn(sessionID string, spawn *msg.RunnerSpawn) err
 		return fmt.Errorf("subprocess already exists for session %s", sessionID)
 	}
 	r.mu.Unlock()
+
+	// Ensure every long-lived backend the harness needs is running on
+	// this host before we fork the wrapper. The bridge populates
+	// Provision based on the harness's deployment manifest.
+	if r.services != nil {
+		for _, svc := range spawn.Provision {
+			if err := r.services.Ensure(svc); err != nil {
+				return fmt.Errorf("provision %s: %w", svc.Name, err)
+			}
+		}
+	}
 
 	binPath := spawn.BinaryPath
 	if binPath == "" {
@@ -130,8 +152,12 @@ func (r *SubprocessRegistry) Spawn(sessionID string, spawn *msg.RunnerSpawn) err
 	if spawn.WorkingDir != "" {
 		cmd.Dir = spawn.WorkingDir
 	}
+	// Always propagate LLMBRIDGE_SERVER so wrappers can fall back to the
+	// bridge's harness-proxy for service-style harnesses (inber, hermes).
+	// Spawn-supplied Env wins for everything else.
+	cmd.Env = append(cmd.Environ(), "LLMBRIDGE_SERVER="+r.serverURL)
 	if len(spawn.Env) > 0 {
-		cmd.Env = append(cmd.Environ(), spawn.Env...)
+		cmd.Env = append(cmd.Env, spawn.Env...)
 	}
 
 	stdin, err := cmd.StdinPipe()

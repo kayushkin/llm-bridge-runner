@@ -38,6 +38,7 @@ type Client struct {
 	cfg      *Config
 	outgoing chan *msg.RunnerMessage
 	registry *SubprocessRegistry
+	services *ServiceRegistry
 }
 
 // NewClient constructs a runner client. The returned Client must be Run.
@@ -46,10 +47,12 @@ func NewClient(cfg *Config) *Client {
 	fetch := func(h msg.Harness) (string, error) {
 		return fetchHarnessBinary(cfg.ServerURL, h)
 	}
+	services := NewServiceRegistry()
 	return &Client{
 		cfg:      cfg,
 		outgoing: outgoing,
-		registry: NewSubprocessRegistry(outgoing, fetch),
+		services: services,
+		registry: NewSubprocessRegistry(outgoing, fetch, cfg.ServerURL, services),
 	}
 }
 
@@ -63,6 +66,7 @@ func (c *Client) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			log.Printf("[runner] shutting down: %v", ctx.Err())
 			c.registry.KillAll()
+			c.services.KillAll()
 			return
 		}
 		log.Printf("[runner] disconnected: %v", err)
@@ -105,7 +109,6 @@ func (c *Client) runOnce(ctx context.Context) error {
 	hello := &msg.RunnerMessage{
 		Type: msg.RunnerMsgHello,
 		Hello: &msg.RunnerHello{
-			MachineName:        c.cfg.MachineName,
 			Hostname:           c.cfg.Hostname,
 			OS:                 c.cfg.OS,
 			Arch:               c.cfg.Arch,
@@ -131,6 +134,18 @@ func (c *Client) runOnce(ctx context.Context) error {
 		}
 		log.Printf("[runner] welcomed: machine_id=%s server=%s",
 			welcome.Welcome.MachineID, welcome.Welcome.ServerVersion)
+		// Sync local saved config if the server's canonical machine name
+		// has drifted from ours (e.g. user renamed the machine in the
+		// bridge UI after enrollment). Best-effort: a write failure
+		// just means we'll re-detect on the next reconnect.
+		if name := welcome.Welcome.MachineName; name != "" && name != c.cfg.MachineName {
+			log.Printf("[runner] machine_name updated by server: %q → %q", c.cfg.MachineName, name)
+			c.cfg.MachineName = name
+			if saved, err := LoadSavedConfig(); err == nil {
+				saved.MachineName = name
+				_ = SaveConfig(saved)
+			}
+		}
 	case msg.RunnerMsgError:
 		if welcome.Err != nil {
 			return fmt.Errorf("server rejected hello: %s — %s",
@@ -155,9 +170,12 @@ func (c *Client) runOnce(ctx context.Context) error {
 	connCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// One goroutine owns ALL writes — outgoing messages and the periodic
+	// ping. gorilla/websocket connections aren't safe for concurrent
+	// writes; running ping on a separate goroutine corrupts frames and
+	// the server reads garbage until its read deadline expires.
 	writeErr := make(chan error, 1)
-	go c.writer(connCtx, conn, writeErr)
-	go c.pinger(connCtx, conn, pingInterval)
+	go c.writer(connCtx, conn, pingInterval, writeErr)
 
 	readErr := c.reader(conn)
 
@@ -226,10 +244,15 @@ func (c *Client) reader(conn *websocket.Conn) error {
 	}
 }
 
-// writer drains outgoing onto the WS conn until the conn dies or ctx
-// cancels. Reports its terminal error on errCh.
-func (c *Client) writer(ctx context.Context, conn *websocket.Conn, errCh chan<- error) {
+// writer is the single owner of all WS writes for this connection.
+// Drains outgoing JSON messages and emits a WebSocket-level ping at
+// the negotiated cadence; multiplexing both into one goroutine
+// guarantees serialized writes (gorilla/websocket isn't safe for
+// concurrent writes). Reports its terminal error on errCh.
+func (c *Client) writer(ctx context.Context, conn *websocket.Conn, pingInterval time.Duration, errCh chan<- error) {
 	defer close(errCh)
+	pingTicker := time.NewTicker(pingInterval)
+	defer pingTicker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -239,22 +262,10 @@ func (c *Client) writer(ctx context.Context, conn *websocket.Conn, errCh chan<- 
 				errCh <- err
 				return
 			}
-		}
-	}
-}
-
-// pinger sends a WebSocket-level ping at the negotiated cadence. The pong
-// handler installed in runOnce extends the read deadline.
-func (c *Client) pinger(ctx context.Context, conn *websocket.Conn, interval time.Duration) {
-	t := time.NewTicker(interval)
-	defer t.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.C:
+		case <-pingTicker.C:
 			conn.SetWriteDeadline(time.Now().Add(writeTimeout))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				errCh <- err
 				return
 			}
 		}
