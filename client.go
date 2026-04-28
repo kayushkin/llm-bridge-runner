@@ -8,11 +8,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/kayushkin/llm-bridge/msg"
 )
+
+// seedTickInterval is the runner-side backstop polling cadence. The
+// WS-driven path (SeedSnapshot from the server) fires sooner when changes
+// land; this guarantees forward progress even if a snapshot was missed
+// while disconnected.
+const seedTickInterval = 5 * time.Minute
 
 // Version is set at build time via -ldflags "-X main.Version=…".
 var Version = "dev"
@@ -39,6 +46,13 @@ type Client struct {
 	outgoing chan *msg.RunnerMessage
 	registry *SubprocessRegistry
 	services *ServiceRegistry
+
+	// Seeded context state. machineID is set once per Welcome and reused
+	// across reconciliations; reconcilers run in the background for each
+	// configured seed source (agent-store, skill-store).
+	machineMu   sync.Mutex
+	machineID   string
+	reconcilers map[msg.SeedSource]*SeedReconciler
 }
 
 // NewClient constructs a runner client. The returned Client must be Run.
@@ -48,11 +62,61 @@ func NewClient(cfg *Config) *Client {
 		return fetchHarnessBinary(cfg.ServerURL, h)
 	}
 	services := NewServiceRegistry()
-	return &Client{
-		cfg:      cfg,
-		outgoing: outgoing,
-		services: services,
-		registry: NewSubprocessRegistry(outgoing, fetch, cfg.ServerURL, services),
+	c := &Client{
+		cfg:         cfg,
+		outgoing:    outgoing,
+		services:    services,
+		registry:    NewSubprocessRegistry(outgoing, fetch, cfg.ServerURL, services),
+		reconcilers: make(map[msg.SeedSource]*SeedReconciler),
+	}
+	c.initReconcilers()
+	return c
+}
+
+// initReconcilers spins up one reconciler per seed source. They run for the
+// life of the process; the Client just wakes them via Trigger when triggers
+// arrive (Welcome, SeedSnapshot WS message). The reconciler internally backs
+// off when machineID is unset, so starting before Welcome is safe.
+func (c *Client) initReconcilers() {
+	for _, source := range []msg.SeedSource{
+		msg.SeedSourceAgentStore,
+		msg.SeedSourceSkillStore,
+	} {
+		rec, err := NewSeedReconciler(source, c.cfg, c.currentMachineID)
+		if err != nil {
+			log.Printf("[seed] init %s reconciler: %v", source, err)
+			continue
+		}
+		c.reconcilers[source] = rec
+		go rec.Run(make(chan struct{}), seedTickInterval)
+	}
+}
+
+// currentMachineID returns the machine_id assigned by the most recent
+// Welcome, or "" if we haven't connected yet.
+func (c *Client) currentMachineID() string {
+	c.machineMu.Lock()
+	defer c.machineMu.Unlock()
+	return c.machineID
+}
+
+func (c *Client) setMachineID(id string) {
+	c.machineMu.Lock()
+	c.machineID = id
+	c.machineMu.Unlock()
+}
+
+// triggerSeed pokes one reconciler (specific source) or all of them
+// (zero-value source).
+func (c *Client) triggerSeed(source msg.SeedSource) {
+	if source == "" {
+		for _, r := range c.reconcilers {
+			r.Trigger()
+		}
+		return
+	}
+	if r := c.reconcilers[source]; r != nil {
+		r.Trigger()
 	}
 }
 
@@ -146,6 +210,10 @@ func (c *Client) runOnce(ctx context.Context) error {
 				_ = SaveConfig(saved)
 			}
 		}
+		// Connect-time reconcile: pull every source so a fresh runner lands
+		// on the bridge's canonical context before any harness spawns.
+		c.setMachineID(welcome.Welcome.MachineID)
+		c.triggerSeed("")
 	case msg.RunnerMsgError:
 		if welcome.Err != nil {
 			return fmt.Errorf("server rejected hello: %s — %s",
@@ -245,6 +313,18 @@ func (c *Client) reader(conn *websocket.Conn) error {
 			c.outgoing <- &msg.RunnerMessage{Type: msg.RunnerMsgPong}
 		case msg.RunnerMsgPong:
 			// Pongs reset the read deadline via SetPongHandler.
+		case msg.RunnerMsgSeedSnapshot:
+			if m.SeedSnapshot == nil {
+				continue
+			}
+			log.Printf("[runner] seed snapshot: source=%s reason=%s",
+				m.SeedSnapshot.Source, m.SeedSnapshot.Reason)
+			c.triggerSeed(m.SeedSnapshot.Source)
+		case msg.RunnerMsgSeedDelta:
+			// Per-file deltas are not used in v1 — the snapshot trigger
+			// drives a full reconcile and the manifest endpoint is the
+			// source of truth for what to apply. Ignore but log for debug.
+			log.Printf("[runner] seed_delta received (unused in v1)")
 		default:
 			log.Printf("[runner] unexpected message type: %s", m.Type)
 		}
