@@ -50,13 +50,13 @@
 #
 # Tunables:
 #   E2E_KEEP        — "1" leaves $TMP_DIR around after the run
-#   E2E_STUB_PORT   — stub server listen port (default 19112)
+#   E2E_STUB_PORT   — stub server listen port (default 19117)
 
 set -euo pipefail
 
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 BIN_NAME="llm-bridge-runner"
-STUB_PORT="${E2E_STUB_PORT:-19112}"
+STUB_PORT="${E2E_STUB_PORT:-19117}"
 STUB_BASE="http://127.0.0.1:$STUB_PORT"
 
 for tool in go jq timeout python3; do
