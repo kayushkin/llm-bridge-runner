@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -133,14 +132,19 @@ func newStrategy(source msg.SeedSource, cfg *Config) (seedStrategy, error) {
 	return nil, fmt.Errorf("unknown seed source: %s", source)
 }
 
-// sidecarDir returns ~/.config/llm-bridge-runner — same directory the runner
-// already uses for its enrollment config.
+// sidecarDir returns the directory the seed sidecar manifests live in. It is
+// DERIVED from configPath() rather than re-resolved from the user's home,
+// because it is the very same directory — and two independent resolutions of one
+// path is how a sandboxed run leaks into the live tree.
+//
+// They did not agree. configPath() honours $LLMBRIDGE_RUNNER_CONFIG and
+// $XDG_CONFIG_HOME; this function used user.Current().HomeDir, which reads
+// /etc/passwd and therefore ignores $HOME entirely. So a test or a smoke could
+// redirect the config file into a sandbox, watch the runner honour it, and still
+// have the seed reconciler create and write ~/.config/llm-bridge-runner in the
+// real home — silently, on every NewClient().
 func sidecarDir() (string, error) {
-	u, err := user.Current()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(u.HomeDir, ".config", "llm-bridge-runner"), nil
+	return filepath.Dir(configPath()), nil
 }
 
 // Trigger asks the reconciler to run a pass soon. Coalesces multiple

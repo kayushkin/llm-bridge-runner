@@ -84,9 +84,21 @@ mkdir -p "$BIN_DIR" "$SANDBOX_HOME"
 # durable bearer token. In the guard's clean-clone environment HOME is already
 # scratch and this does not exist; when a human runs this smoke by hand it is the
 # real one, and that is exactly the case worth protecting.
-LIVE_CONFIG="${XDG_CONFIG_HOME:-$HOME/.config}/llm-bridge-runner/config.json"
+#
+# 🔴 SANDBOXING $HOME IS NOT ENOUGH FOR THIS BINARY, and that is not obvious.
+# configPath() falls back to user.Current().HomeDir, which reads /etc/passwd and
+# IGNORES $HOME. Only $LLMBRIDGE_RUNNER_CONFIG actually redirects it. The seed
+# reconcilers (NewClient -> initReconcilers) MkdirAll this same directory, so a
+# run that forgets the override creates and writes the REAL config dir even with
+# HOME pointed at a scratch path. So the guard below watches the DIRECTORY, not
+# just config.json: the first leak this smoke ever sprang left the file absent
+# and the directory behind, and a file-only check waved it through.
+LIVE_CONFIG_DIR="$(cd ~ 2>/dev/null && pwd)/.config/llm-bridge-runner"
+LIVE_CONFIG="$LIVE_CONFIG_DIR/config.json"
 LIVE_CONFIG_BEFORE=""
 LIVE_CONFIG_EXISTED=0
+LIVE_DIR_EXISTED=0
+[ -d "$LIVE_CONFIG_DIR" ] && LIVE_DIR_EXISTED=1
 if [ -f "$LIVE_CONFIG" ]; then
   LIVE_CONFIG_EXISTED=1
   LIVE_CONFIG_BEFORE="$(sha256sum "$LIVE_CONFIG" | cut -d' ' -f1)"
@@ -111,6 +123,16 @@ check_live_config_untouched() {
     echo "!!! THIS SMOKE CREATED A LIVE RUNNER CONFIG AT $LIVE_CONFIG" >&2
     echo "!!! \$LLMBRIDGE_RUNNER_CONFIG was not honoured, so the sandboxed enrol" >&2
     echo "!!! wrote a real one. Delete it — it is a phantom machine identity." >&2
+    return 1
+  fi
+  # The directory, not only the file. The seed reconcilers MkdirAll it on every
+  # NewClient(), so a path-resolution leak shows up here FIRST — with the config
+  # file still absent. Checking only config.json missed exactly that.
+  if [ "$LIVE_DIR_EXISTED" = "0" ] && [ -d "$LIVE_CONFIG_DIR" ]; then
+    echo "" >&2
+    echo "!!! THIS SMOKE CREATED THE LIVE CONFIG DIR $LIVE_CONFIG_DIR" >&2
+    echo "!!! Something in the runner resolves that path from /etc/passwd rather" >&2
+    echo "!!! than from \$LLMBRIDGE_RUNNER_CONFIG, so the sandbox does not hold." >&2
     return 1
   fi
   return 0
@@ -422,12 +444,28 @@ grep -q "shutting down" "$RUN_LOG" || fail "\`run\` exited on SIGTERM without lo
 
 # ---------------------------------------------------------------------------
 step "8. the sandbox held"
-# The runner must have persisted nothing outside $LLMBRIDGE_RUNNER_CONFIG. The
-# live-config check runs from the trap on every exit path; this one catches a
-# leak into the sandboxed HOME, which is where the default config path resolves.
-if [ -e "$SANDBOX_HOME/.config/llm-bridge-runner" ]; then
-  fail "the runner wrote to \$HOME/.config/llm-bridge-runner despite \$LLMBRIDGE_RUNNER_CONFIG being set"
+# `run` builds the seed reconcilers, which MkdirAll their sidecar directory. That
+# directory must be the one $LLMBRIDGE_RUNNER_CONFIG names — assert it POSITIVELY,
+# here, rather than only asserting the live path stayed clean. A negative check
+# alone passes just as happily when the code path never ran at all.
+SIDECAR_DIR="$(dirname "$TMP_DIR/closed-port-config.json")"
+[ -d "$SIDECAR_DIR" ] || fail "the seed reconcilers never created their sidecar dir — this assertion is not exercising anything"
+
+# And nothing may have landed under the sandboxed HOME. Note this check is NOT
+# what protects the live tree: configPath() falls back to user.Current().HomeDir,
+# which ignores $HOME entirely, so a leak lands in the REAL home rather than here.
+# That case is caught by check_live_config_untouched, from the trap, on every exit
+# path. This one only catches a NEW path that does honour $HOME.
+if [ -n "$(ls -A "$SANDBOX_HOME" 2>/dev/null)" ]; then
+  fail "the runner wrote to the sandboxed \$HOME: $(ls -A "$SANDBOX_HOME")"
 fi
+
+# Check the live tree HERE too, not only from the trap. The trap runs after this
+# banner and can still fail the run — but by then stdout already said "OK", and a
+# human reading the log believes the last line, not the exit code. A smoke whose
+# output disagrees with its exit status is the same defect as one that prints
+# FAIL and exits 0, just pointed the other way.
+check_live_config_untouched || fail "the run leaked into the live config tree (see above)"
 
 echo ""
 echo "e2e smoke test OK ($BIN_NAME)"

@@ -5,6 +5,7 @@ import (
 	"context"
 	"log"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -46,6 +47,13 @@ func (b *syncBuffer) String() string {
 // dead — rather than checking the shutdown log line, which is a proxy that a
 // future refactor could keep printing while dropping the kill.
 func TestRunKillsManagedServicesWhenCancelledDuringBackoff(t *testing.T) {
+	// NewClient builds the seed reconcilers, which MkdirAll their sidecar
+	// directory. Point the config path at the test's scratch dir first: without
+	// this, that directory resolves into the developer's REAL ~/.config and the
+	// test writes to the live tree every time it runs. (It did, once — that is
+	// how the sidecarDir/configPath split was found.)
+	t.Setenv("LLMBRIDGE_RUNNER_CONFIG", filepath.Join(t.TempDir(), "config.json"))
+
 	logs := &syncBuffer{}
 	originalOutput := log.Writer()
 	originalFlags := log.Flags()
@@ -127,5 +135,34 @@ func TestRunKillsManagedServicesWhenCancelledDuringBackoff(t *testing.T) {
 
 	if !strings.Contains(logs.String(), "shutting down") {
 		t.Errorf("Run exited without logging a shutdown; logs:\n%s", logs.String())
+	}
+}
+
+// TestSidecarDirFollowsTheConfigOverride pins the sidecar directory to the
+// config file's directory, because they ARE the same directory and used to be
+// resolved two different ways.
+//
+// configPath() honours $LLMBRIDGE_RUNNER_CONFIG; sidecarDir() used
+// user.Current().HomeDir, which reads /etc/passwd and ignores $HOME. Anything
+// that redirected the config into a sandbox — a test, the e2e smoke, an
+// operator — still had the seed reconciler create and write the real
+// ~/.config/llm-bridge-runner, and nothing said so.
+func TestSidecarDirFollowsTheConfigOverride(t *testing.T) {
+	sandbox := t.TempDir()
+	t.Setenv("LLMBRIDGE_RUNNER_CONFIG", filepath.Join(sandbox, "nested", "config.json"))
+
+	got, err := sidecarDir()
+	if err != nil {
+		t.Fatalf("sidecarDir: %v", err)
+	}
+
+	want := filepath.Join(sandbox, "nested")
+	if got != want {
+		t.Errorf("sidecarDir() = %q, want %q — the sidecar dir must follow the config override, "+
+			"or a sandboxed run writes seed manifests into the real home", got, want)
+	}
+	if got != filepath.Dir(configPath()) {
+		t.Errorf("sidecarDir() = %q but configPath()'s dir is %q — these name one directory and "+
+			"must not be resolved independently", got, filepath.Dir(configPath()))
 	}
 }
