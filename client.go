@@ -123,14 +123,24 @@ func (c *Client) triggerSeed(source msg.SeedSource) {
 // Run drives the connect-and-serve loop until the context is cancelled.
 // Each iteration attempts one connection; on disconnect, in-flight
 // subprocesses are killed and the loop redials after a backoff.
+//
+// Teardown is deferred rather than written at each return, because Run has
+// two of them and they used to disagree: cancelling during the reconnect
+// backoff — where the runner spends its whole life whenever the server is
+// unreachable — returned without killing the managed services, orphaning
+// every one of them. A defer makes the teardown a property of leaving Run
+// at all, so a future third return path cannot reintroduce the leak.
 func (c *Client) Run(ctx context.Context) {
+	defer func() {
+		log.Printf("[runner] shutting down: %v", ctx.Err())
+		c.registry.KillAll()
+		c.services.KillAll()
+	}()
+
 	backoff := minBackoff
 	for {
 		err := c.runOnce(ctx)
 		if ctx.Err() != nil {
-			log.Printf("[runner] shutting down: %v", ctx.Err())
-			c.registry.KillAll()
-			c.services.KillAll()
 			return
 		}
 		log.Printf("[runner] disconnected: %v", err)
