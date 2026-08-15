@@ -34,6 +34,40 @@ TARGETS=(
 TMPDIR_BUILD="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BUILD"' EXIT
 
+# Refuses a binary that carries no vcs.revision, and warns when it was built from a
+# dirty tree. Every target is checked the moment it is built, so nothing reaches the
+# publish loop below unidentified: these binaries are served to remote machines from
+# /api/runner/binary, and once a runner has fetched one, the only record of what
+# source it runs is the stamp inside it.
+#
+# go build writes no VCS information when it cannot find a .git DIRECTORY, and it does
+# not fail when that happens -- not even with -buildvcs=true, and not even with no
+# repository at all (measured on go1.26.0). A git worktree's .git is a pointer file,
+# so a deploy run from one publishes binaries stamped (devel) while the log reads
+# clean. A provenance stamp is the one property whose absence looks exactly like
+# success, so assert it rather than trusting the build.
+check_provenance() {
+  local binary="$1" target="$2" buildinfo vcs_revision vcs_modified
+  buildinfo="$(go version -m "$binary")"
+  vcs_revision="$(printf '%s\n' "$buildinfo" | awk -F= '$1 ~ /[[:space:]]vcs\.revision$/ {print $2}')"
+  vcs_modified="$(printf '%s\n' "$buildinfo" | awk -F= '$1 ~ /[[:space:]]vcs\.modified$/ {print $2}')"
+  if [ -z "$vcs_revision" ]; then
+    echo "    REFUSING TO PUBLISH: the $target binary carries no vcs.revision, so nothing can" >&2
+    echo "    tie it back to a commit. 'go build' writes no VCS stamp when it cannot find a" >&2
+    echo "    .git DIRECTORY, and it does not fail when that happens -- not even with" >&2
+    echo "    -buildvcs=true. The usual cause is building from a git worktree, whose .git is" >&2
+    echo "    a pointer file. Build from a real clone or checkout instead." >&2
+    exit 1
+  fi
+  echo "    vcs.revision=$vcs_revision"
+  if [ "$vcs_modified" = "true" ]; then
+    echo "    WARNING: the $target binary was built from a DIRTY tree (vcs.modified=true)." >&2
+    echo "    $vcs_revision names the commit it was built NEAR, not the source it was built" >&2
+    echo "    FROM, and that source is not recoverable from any commit. Commit first for a" >&2
+    echo "    reproducible build." >&2
+  fi
+}
+
 for t in "${TARGETS[@]}"; do
   read -r OS ARCH <<< "$t"
   OUT="$TMPDIR_BUILD/$NAME-$OS-$ARCH"
@@ -42,6 +76,11 @@ for t in "${TARGETS[@]}"; do
     -ldflags "-X main.Version=$VERSION" \
     -o "$OUT" .
   echo "    $(ls -lh "$OUT" | awk '{print $5}')  $OUT"
+  # Cross-compiled binaries carry the same stamp as a native build, and 'go version -m'
+  # reads a foreign GOOS/GOARCH file without executing it -- both measured here on
+  # go1.26.0 against darwin/arm64 from this linux host. So each target is checked for
+  # real, not assumed to inherit the host build's provenance.
+  check_provenance "$OUT" "$OS/$ARCH"
 done
 
 echo "==> Publishing to $ASSETS_DIR..."
