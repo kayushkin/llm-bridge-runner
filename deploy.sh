@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# One shared gate decides whether this tree may be deployed (main clone, default
+# branch, clean, pushed, not behind, and the same for every tree the build reads).
+# It lives in healthcheck/scripts/deploy-gate.sh. Do not inline or copy it.
+( cd "$(dirname "$0")" && "$HOME/bin/deploy-gate" check )
+
 # Cross-builds the runner for every (linux|darwin)/(amd64|arm64) target and
 # drops the binaries into LLMBRIDGE_RUNNER_ASSETS_DIR (default
 # /usr/local/lib/llm-bridge-runner-binaries). llm-bridge-server serves these
@@ -94,3 +99,6 @@ done
 
 echo "==> Done. version=$VERSION"
 echo "    runners auto-fetch via /api/runner/binary on next reconnect."
+
+# Last act: write this deploy to repo-store's ledger, so the next agent sees what is live.
+( cd "$(dirname "$0")" && "$HOME/bin/deploy-gate" record )
