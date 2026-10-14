@@ -39,7 +39,7 @@ WSL stops its Linux VM soon after the last terminal closes, taking the runner wi
 curl -fsSL https://raw.githubusercontent.com/kayushkin/llm-bridge-runner/main/scripts/wsl-setup.sh | bash
 ```
 
-It makes sure systemd and linger are on, registers a hidden Windows logon task that holds the distro open, and then runs `install.sh` (updating in place from the saved config, or enrolling when given `--endpoint` and `--passphrase`).
+It makes sure systemd and linger are on, puts a shortcut in the Windows Startup folder that holds the distro open, hidden (no administrator rights needed), and then runs `install.sh` (updating in place from the saved config, or enrolling when given `--endpoint` and `--passphrase`).
 
 ## Mint a passphrase (server side)
 
