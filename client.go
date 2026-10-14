@@ -286,8 +286,12 @@ func (c *Client) reader(conn *websocket.Conn) error {
 			// for health), and blocking the reader starves WS pongs —
 			// the connection then dies on the server-side read deadline
 			// before we can finish setup.
+			// Marked as starting here, on the read loop, so stdin that
+			// arrives before the process exists is held, not dropped.
+			c.registry.BeginSpawn(m.SessionID)
 			go func(sessionID string, spawn *msg.RunnerSpawn) {
 				if err := c.registry.Spawn(sessionID, spawn); err != nil {
+					c.registry.AbandonSpawn(sessionID)
 					log.Printf("[runner] spawn failed (session=%s): %v", sessionID, err)
 					c.outgoing <- &msg.RunnerMessage{
 						Type:      msg.RunnerMsgExit,
@@ -300,12 +304,12 @@ func (c *Client) reader(conn *websocket.Conn) error {
 			if m.Stdin == nil || m.SessionID == "" {
 				continue
 			}
-			sp := c.registry.Get(m.SessionID)
-			if sp == nil {
+			known, err := c.registry.DeliverStdin(m.SessionID, m.Stdin.Data)
+			if !known {
 				log.Printf("[runner] stdin for unknown session: %s", m.SessionID)
 				continue
 			}
-			if err := sp.WriteLine(m.Stdin.Data); err != nil {
+			if err != nil {
 				log.Printf("[runner] stdin write failed (session=%s): %v", m.SessionID, err)
 			}
 		case msg.RunnerMsgSignal:

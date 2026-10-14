@@ -61,8 +61,15 @@ func (s *Subprocess) Signal(sig msg.RunnerSignalType) error {
 // SubprocessRegistry tracks active subprocesses by session ID. Methods are
 // safe for concurrent use.
 type SubprocessRegistry struct {
-	mu                sync.Mutex
-	procs             map[string]*Subprocess
+	mu    sync.Mutex
+	procs map[string]*Subprocess
+	// startingStdin holds, per session whose Spawn is still running, the
+	// stdin lines that arrived before its process did. The bridge sends a
+	// session's first input right behind its Spawn, and Spawn runs off the
+	// read loop, so the input can win: the runner used to drop it ("stdin for
+	// unknown session") and the harness then waited forever for a prompt
+	// (br_1792016658336160620, 2026-10-14).
+	startingStdin     map[string][]string
 	outgoing          chan<- *msg.RunnerMessage // single shared sink to the WS writer
 	installCurrentBin func(harness msg.Harness) (string, error)
 	serverURL         string // propagated to subprocesses as LLMBRIDGE_SERVER
@@ -86,6 +93,7 @@ type SubprocessRegistry struct {
 func NewSubprocessRegistry(outgoing chan<- *msg.RunnerMessage, installCurrentBin func(harness msg.Harness) (string, error), serverURL string, services *ServiceRegistry) *SubprocessRegistry {
 	return &SubprocessRegistry{
 		procs:             make(map[string]*Subprocess),
+		startingStdin:     make(map[string][]string),
 		outgoing:          outgoing,
 		installCurrentBin: installCurrentBin,
 		serverURL:         serverURL,
@@ -94,6 +102,41 @@ func NewSubprocessRegistry(outgoing chan<- *msg.RunnerMessage, installCurrentBin
 }
 
 // Get returns the Subprocess for a session or nil if none.
+// BeginSpawn marks a session as starting, so DeliverStdin holds its input
+// until Spawn has a process to give it to. Call it on the read loop, before
+// handing the Spawn to a goroutine.
+func (r *SubprocessRegistry) BeginSpawn(sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, running := r.procs[sessionID]; !running {
+		r.startingStdin[sessionID] = []string{}
+	}
+}
+
+// AbandonSpawn forgets a session whose Spawn failed, with any input held for it.
+func (r *SubprocessRegistry) AbandonSpawn(sessionID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.startingStdin, sessionID)
+}
+
+// DeliverStdin writes a line to the session's process, or holds it while
+// the session is starting. It reports false for a session that is neither.
+func (r *SubprocessRegistry) DeliverStdin(sessionID, line string) (bool, error) {
+	r.mu.Lock()
+	if held, starting := r.startingStdin[sessionID]; starting {
+		r.startingStdin[sessionID] = append(held, line)
+		r.mu.Unlock()
+		return true, nil
+	}
+	sp := r.procs[sessionID]
+	r.mu.Unlock()
+	if sp == nil {
+		return false, nil
+	}
+	return true, sp.WriteLine(line)
+}
+
 func (r *SubprocessRegistry) Get(sessionID string) *Subprocess {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -207,7 +250,19 @@ func (r *SubprocessRegistry) Spawn(sessionID string, spawn *msg.RunnerSpawn) err
 		return fmt.Errorf("send start: %w", err)
 	}
 
+	// Input that arrived while the process was starting goes in first, after
+	// the start line and before anything later; registering under the same
+	// lock keeps that order.
 	r.mu.Lock()
+	for _, line := range r.startingStdin[sessionID] {
+		if err := sp.WriteLine(line); err != nil {
+			delete(r.startingStdin, sessionID)
+			r.mu.Unlock()
+			cmd.Process.Kill()
+			return fmt.Errorf("deliver input that arrived during the spawn: %w", err)
+		}
+	}
+	delete(r.startingStdin, sessionID)
 	r.procs[sessionID] = sp
 	r.mu.Unlock()
 
