@@ -194,3 +194,16 @@ func TestEveryKeyClaudeNamesIsKnown(t *testing.T) {
 		}
 	}
 }
+
+func TestEveryMacKeyClaudeNamesIsKnown(t *testing.T) {
+	for _, name := range []string{"Return", "Tab", "Escape", "BackSpace", "Delete", "Page_Down", "Up", "F5", "space"} {
+		if _, ok := macKeyCodes[strings.ToLower(name)]; !ok {
+			t.Errorf("key %q has no macOS key code", name)
+		}
+	}
+	for _, name := range []string{"cmd", "super", "ctrl", "alt", "shift"} {
+		if _, ok := macModifierNamed(name); !ok {
+			t.Errorf("modifier %q is not mapped", name)
+		}
+	}
+}

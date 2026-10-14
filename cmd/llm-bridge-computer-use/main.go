@@ -9,7 +9,9 @@
 // the screenshot's pixels; the screenshot is the screen scaled to fit
 // 1280×800, and the tool maps every coordinate back to the screen.
 //
-// On Windows it drives the interactive desktop of the user it runs as. Run
+// On macOS it drives the main display through screencapture and osascript
+// (desktop_darwin.go); macOS asks once for Screen Recording and
+// Accessibility. On Windows it drives the interactive desktop of the user it runs as. Run
 // from WSL it is still a Windows program: Claude Code inside WSL starts the
 // .exe through WSL's Windows interop, and it runs in the Windows session WSL
 // was started from. It cannot act on a locked screen or on the secure

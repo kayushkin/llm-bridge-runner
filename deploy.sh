@@ -37,11 +37,13 @@ TARGETS=(
 )
 
 # The computer-use tool, served beside the runner as
-# llm-bridge-computer-use-<os>-<arch>. Windows only so far; Claude Code in
-# WSL starts the Windows build through interop.
+# llm-bridge-computer-use-<os>-<arch>. Claude Code in WSL starts the Windows
+# build through interop; the macOS build needs no cgo, so it cross-compiles.
 COMPUTER_USE_NAME="llm-bridge-computer-use"
 COMPUTER_USE_TARGETS=(
   "windows amd64"
+  "darwin arm64"
+  "darwin amd64"
 )
 
 TMPDIR_BUILD="$(mktemp -d)"
