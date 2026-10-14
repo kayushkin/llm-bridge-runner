@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -143,6 +144,10 @@ func (c *Client) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
+		if errors.Is(err, errRunnerReplaced) {
+			log.Printf("[runner] %v; stopping so the service manager starts it", err)
+			return
+		}
 		log.Printf("[runner] disconnected: %v", err)
 		c.registry.KillAll()
 
@@ -173,6 +178,20 @@ func (c *Client) runOnce(ctx context.Context) error {
 	headers := http.Header{}
 	headers.Set("Authorization", "Bearer "+c.cfg.RunnerToken)
 
+	// Self-update first, while no session is running.
+	if replaced, err := installCurrentRunner(c.cfg.ServerURL); err != nil {
+		log.Printf("[runner] WARNING: could not check this runner against the bridge's build; running this one: %v", err)
+	} else if replaced {
+		return errRunnerReplaced
+	}
+
+	computerUse, err := installCurrentComputerUseTool(c.cfg.ServerURL)
+	if err != nil {
+		log.Printf("[runner] ERROR: computer use will not be offered from this machine: %v", err)
+	} else if computerUse != nil {
+		log.Printf("[runner] computer-use tool %s (%s)", computerUse.Command, computerUse.Version)
+	}
+
 	log.Printf("[runner] dialing %s", wsURL)
 	conn, _, err := dialer.DialContext(ctx, wsURL, headers)
 	if err != nil {
@@ -190,6 +209,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 			WorkingDir:         c.cfg.WorkingDir,
 			AvailableHarnesses: DetectHarnesses(),
 			RunnerVersion:      Version,
+			ComputerUse:        computerUse,
 		},
 	}
 	if err := writeJSON(conn, hello); err != nil {

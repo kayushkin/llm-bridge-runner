@@ -41,6 +41,14 @@ curl -fsSL https://raw.githubusercontent.com/kayushkin/llm-bridge-runner/main/sc
 
 It makes sure systemd and linger are on, puts a shortcut in the Windows Startup folder that holds the distro open, hidden (no administrator rights needed), and then runs `install.sh` (updating in place from the saved config, or enrolling when given `--endpoint` and `--passphrase`).
 
+## Updates
+
+The runner keeps itself current. Before each connection it asks the bridge for its own build and, when the bridge has a newer one, replaces `~/.local/bin/llm-bridge-runner` and exits; systemd (`Restart=always`) or launchd (`KeepAlive`) starts the new one. It does the same for each harness wrapper it installed, before every session. A runner run from anywhere else is never replaced.
+
+## Computer use
+
+On WSL the runner installs `llm-bridge-computer-use.exe`, the Windows build, under `%LOCALAPPDATA%\llm-bridge`, keeps it current, and reports it to the bridge. The bridge hands it to a Claude Code session that asks (`harness_config.computer_use: true`) only when the machine's owner has switched computer use on (`PUT /machines/{id}/computer-use {"allowed": true}`). Claude Code in WSL starts it through interop, and it drives the desktop of the Windows session WSL runs in; it cannot act on a locked screen or on administrator prompts.
+
 ## Mint a passphrase (server side)
 
 On the host running llm-bridge-server:

@@ -83,3 +83,44 @@ func TestInstallCurrentHarnessBinaryDownloadsKeepsAndReplaces(t *testing.T) {
 		t.Errorf("mode = %v", info.Mode())
 	}
 }
+
+func TestInstallCurrentBinaryReportsWhetherItReplacedTheFile(t *testing.T) {
+	server := &fakeBinaryServer{}
+	server.content.Store([]byte("v1"))
+	server.modified.Store(time.Date(2026, 10, 14, 20, 0, 0, 0, time.UTC))
+	bridge := httptest.NewServer(server)
+	t.Cleanup(bridge.Close)
+	dest := t.TempDir() + "/llm-bridge-runner"
+
+	for i, want := range []bool{true, false} {
+		replaced, err := installCurrentBinary(bridge.URL, dest)
+		if err != nil || replaced != want {
+			t.Fatalf("call %d: replaced=%v err=%v, want %v", i, replaced, err, want)
+		}
+	}
+	server.content.Store([]byte("v2"))
+	server.modified.Store(time.Date(2026, 10, 14, 23, 0, 0, 0, time.UTC))
+	if replaced, err := installCurrentBinary(bridge.URL, dest); err != nil || !replaced {
+		t.Fatalf("after the bridge updated: replaced=%v err=%v", replaced, err)
+	}
+}
+
+// A runner run from anywhere but the installer's ~/.local/bin (a development
+// build, this test binary) is never replaced, and the bridge is not asked.
+func TestARunnerOutsideTheInstalledPathIsNotUpdated(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	replaced, err := installCurrentRunner("http://bridge.invalid")
+	if err != nil || replaced {
+		t.Errorf("replaced=%v err=%v; want no update and no request", replaced, err)
+	}
+}
+
+func TestNoComputerUseToolOutsideWSL(t *testing.T) {
+	if runningInWSLWithInterop() {
+		t.Skip("this machine is WSL")
+	}
+	tool, err := installCurrentComputerUseTool("http://bridge.invalid")
+	if tool != nil || err != nil {
+		t.Errorf("tool=%+v err=%v; want none, quietly", tool, err)
+	}
+}

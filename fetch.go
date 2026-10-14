@@ -37,13 +37,23 @@ func installCurrentHarnessBinary(serverURL string, harness msg.Harness) (string,
 	if err != nil {
 		return "", err
 	}
+	_, err = installCurrentBinary(endpoint, dest)
+	return dest, err
+}
+
+// installCurrentBinary makes dest the file the bridge serves at endpoint,
+// asking with If-Modified-Since set to dest's modification time, and reports
+// whether it replaced dest. A downloaded file takes the bridge's
+// Last-Modified as its modification time, so the next ask means "newer than
+// what I have?".
+func installCurrentBinary(endpoint, dest string) (bool, error) {
 	if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
-		return "", fmt.Errorf("create bin dir: %w", err)
+		return false, fmt.Errorf("create bin dir: %w", err)
 	}
 
 	request, err := http.NewRequest(http.MethodGet, endpoint, nil)
 	if err != nil {
-		return "", err
+		return false, err
 	}
 	if current, err := os.Stat(dest); err == nil {
 		request.Header.Set("If-Modified-Since", current.ModTime().UTC().Format(http.TimeFormat))
@@ -51,53 +61,53 @@ func installCurrentHarnessBinary(serverURL string, harness msg.Harness) (string,
 	httpClient := &http.Client{Timeout: 60 * time.Second}
 	resp, err := httpClient.Do(request)
 	if err != nil {
-		return "", fmt.Errorf("GET %s: %w", endpoint, err)
+		return false, fmt.Errorf("GET %s: %w", endpoint, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotModified {
-		return dest, nil
+		return false, nil
 	}
 	if resp.StatusCode/100 != 2 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return "", fmt.Errorf("download %s: HTTP %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
+		return false, fmt.Errorf("download %s: HTTP %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	// Write to a sibling tmp file then rename, so a crashed download
 	// doesn't leave a half-written binary on PATH.
 	tmp, err := os.CreateTemp(filepath.Dir(dest), filepath.Base(dest)+".part-*")
 	if err != nil {
-		return "", err
+		return false, err
 	}
 	tmpPath := tmp.Name()
 	if _, err := io.Copy(tmp, resp.Body); err != nil {
 		tmp.Close()
 		os.Remove(tmpPath)
-		return "", fmt.Errorf("download body: %w", err)
+		return false, fmt.Errorf("download body: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
-		return "", err
+		return false, err
 	}
 	if err := os.Chmod(tmpPath, 0755); err != nil {
 		os.Remove(tmpPath)
-		return "", err
+		return false, err
 	}
 	// The copy's modification time is the bridge file's, so the next
 	// If-Modified-Since asks "newer than what I have?".
 	lastModified, err := http.ParseTime(resp.Header.Get("Last-Modified"))
 	if err != nil {
 		os.Remove(tmpPath)
-		return "", fmt.Errorf("the bridge sent %s without a usable Last-Modified (%q), so a later update could not be detected", endpoint, resp.Header.Get("Last-Modified"))
+		return false, fmt.Errorf("the bridge sent %s without a usable Last-Modified (%q), so a later update could not be detected", endpoint, resp.Header.Get("Last-Modified"))
 	}
 	if err := os.Chtimes(tmpPath, lastModified, lastModified); err != nil {
 		os.Remove(tmpPath)
-		return "", err
+		return false, err
 	}
 	if err := os.Rename(tmpPath, dest); err != nil {
 		os.Remove(tmpPath)
-		return "", fmt.Errorf("install %s: %w", dest, err)
+		return false, fmt.Errorf("install %s: %w", dest, err)
 	}
-	return dest, nil
+	return true, nil
 }
 
 // harnessBinaryPath returns the canonical install path for a harness
@@ -118,6 +128,12 @@ func harnessBinaryPath(harness msg.Harness) (string, error) {
 // buildBinaryURL composes the canonical /api/runner/binary URL for a
 // short harness name (e.g. "claudecode") on this runner's GOOS/GOARCH.
 func buildBinaryURL(serverURL, shortName string) (string, error) {
+	return buildBinaryURLFor(serverURL, shortName, runtime.GOOS, runtime.GOARCH)
+}
+
+// buildBinaryURLFor is buildBinaryURL for another system: the Windows
+// computer-use tool a runner in WSL installs, for one.
+func buildBinaryURLFor(serverURL, shortName, goos, goarch string) (string, error) {
 	u, err := url.Parse(serverURL)
 	if err != nil {
 		return "", err
@@ -134,8 +150,8 @@ func buildBinaryURL(serverURL, shortName string) (string, error) {
 	u.Path = strings.TrimRight(u.Path, "/") + "/api/runner/binary"
 	q := u.Query()
 	q.Set("name", shortName)
-	q.Set("os", runtime.GOOS)
-	q.Set("arch", runtime.GOARCH)
+	q.Set("os", goos)
+	q.Set("arch", goarch)
 	u.RawQuery = q.Encode()
 	return u.String(), nil
 }

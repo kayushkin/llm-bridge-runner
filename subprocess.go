@@ -170,6 +170,13 @@ func (r *SubprocessRegistry) Spawn(sessionID string, spawn *msg.RunnerSpawn) err
 		}
 	}
 
+	// A session given computer use gets the tool as it is on the bridge now.
+	if spawn.ComputerUse {
+		if _, err := installCurrentComputerUseTool(r.serverURL); err != nil {
+			log.Printf("[runner] WARNING: could not update the computer-use tool for session %s; it runs the copy on disk: %v", sessionID, err)
+		}
+	}
+
 	binPath := spawn.BinaryPath
 	if binPath == "" {
 		bin := msg.HarnessBinaryName(spawn.Harness)
