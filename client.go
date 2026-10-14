@@ -58,15 +58,15 @@ type Client struct {
 // NewClient constructs a runner client. The returned Client must be Run.
 func NewClient(cfg *Config) *Client {
 	outgoing := make(chan *msg.RunnerMessage, outgoingBuffer)
-	fetch := func(h msg.Harness) (string, error) {
-		return fetchHarnessBinary(cfg.ServerURL, h)
+	installCurrent := func(h msg.Harness) (string, error) {
+		return installCurrentHarnessBinary(cfg.ServerURL, h)
 	}
 	services := NewServiceRegistry()
 	c := &Client{
 		cfg:         cfg,
 		outgoing:    outgoing,
 		services:    services,
-		registry:    NewSubprocessRegistry(outgoing, fetch, cfg.ServerURL, services),
+		registry:    NewSubprocessRegistry(outgoing, installCurrent, cfg.ServerURL, services),
 		reconcilers: make(map[msg.SeedSource]*SeedReconciler),
 	}
 	c.initReconcilers()

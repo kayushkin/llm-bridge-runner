@@ -158,7 +158,7 @@ func (r *ServiceRegistry) KillAll() {
 
 // resolveServiceBinary returns an absolute path to the service binary,
 // downloading it from the manifest's BinaryURL when not already on
-// disk. Mirrors fetchHarnessBinary for wrapper binaries but uses the
+// disk. Mirrors installCurrentHarnessBinary for wrapper binaries but uses the
 // service's `Name` for the install path so unrelated services don't
 // collide.
 func resolveServiceBinary(m msg.HarnessService) (string, error) {

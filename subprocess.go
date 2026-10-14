@@ -61,18 +61,21 @@ func (s *Subprocess) Signal(sig msg.RunnerSignalType) error {
 // SubprocessRegistry tracks active subprocesses by session ID. Methods are
 // safe for concurrent use.
 type SubprocessRegistry struct {
-	mu        sync.Mutex
-	procs     map[string]*Subprocess
-	outgoing  chan<- *msg.RunnerMessage // single shared sink to the WS writer
-	fetchBin  func(harness msg.Harness) (string, error)
-	serverURL string // propagated to subprocesses as LLMBRIDGE_SERVER
-	services  *ServiceRegistry
+	mu                sync.Mutex
+	procs             map[string]*Subprocess
+	outgoing          chan<- *msg.RunnerMessage // single shared sink to the WS writer
+	installCurrentBin func(harness msg.Harness) (string, error)
+	serverURL         string // propagated to subprocesses as LLMBRIDGE_SERVER
+	services          *ServiceRegistry
 }
 
 // NewSubprocessRegistry constructs a registry that ships subprocess output
-// onto outgoing. fetchBin is invoked when a Spawn request names a harness
-// whose wrapper binary is not on PATH; the returned absolute path is used
-// for the exec. nil disables the fallback (Spawn fails fast).
+// onto outgoing. installCurrentBin is invoked when a Spawn request names a
+// harness whose wrapper is not on PATH, or whose wrapper on PATH is the copy
+// the runner itself installed under ~/.local/bin, so that copy follows the
+// bridge's; the returned absolute path is used for the exec. A wrapper
+// installed anywhere else is the machine owner's and is left alone. nil
+// disables both (Spawn fails fast on a missing wrapper).
 //
 // services owns long-lived backend daemons declared in spawn manifests
 // (e.g. inber-server). Provided at construction so Spawn can ensure
@@ -80,13 +83,13 @@ type SubprocessRegistry struct {
 //
 // serverURL is exported to every spawned subprocess as LLMBRIDGE_SERVER so
 // wrappers can refer back to the bridge for any side-channel needs.
-func NewSubprocessRegistry(outgoing chan<- *msg.RunnerMessage, fetchBin func(harness msg.Harness) (string, error), serverURL string, services *ServiceRegistry) *SubprocessRegistry {
+func NewSubprocessRegistry(outgoing chan<- *msg.RunnerMessage, installCurrentBin func(harness msg.Harness) (string, error), serverURL string, services *ServiceRegistry) *SubprocessRegistry {
 	return &SubprocessRegistry{
-		procs:     make(map[string]*Subprocess),
-		outgoing:  outgoing,
-		fetchBin:  fetchBin,
-		serverURL: serverURL,
-		services:  services,
+		procs:             make(map[string]*Subprocess),
+		outgoing:          outgoing,
+		installCurrentBin: installCurrentBin,
+		serverURL:         serverURL,
+		services:          services,
 	}
 }
 
@@ -130,20 +133,26 @@ func (r *SubprocessRegistry) Spawn(sessionID string, spawn *msg.RunnerSpawn) err
 		if bin == "" {
 			return fmt.Errorf("unknown harness type: %s", spawn.Harness)
 		}
-		resolved, err := exec.LookPath(bin)
-		if err != nil {
-			// Wrapper binary missing — try to fetch it from the bridge.
-			// Falling back to a local install lets new harnesses light up
-			// on a runner without re-running the installer.
-			if r.fetchBin == nil {
-				return fmt.Errorf("binary not found on PATH: %s (no fetch hook configured)", bin)
+		resolved, lookErr := exec.LookPath(bin)
+		managed, managedErr := harnessBinaryPath(spawn.Harness)
+		runnerInstalled := lookErr == nil && managedErr == nil && resolved == managed
+		if lookErr != nil || runnerInstalled {
+			if r.installCurrentBin == nil {
+				if lookErr != nil {
+					return fmt.Errorf("binary not found on PATH: %s (no fetch hook configured)", bin)
+				}
+			} else {
+				installed, err := r.installCurrentBin(spawn.Harness)
+				switch {
+				case err == nil:
+					resolved = installed
+				case lookErr != nil:
+					return fmt.Errorf("binary not found on PATH: %s; auto-fetch failed: %w", bin, err)
+				default:
+					// The copy on disk still runs; say loudly that it may be stale.
+					log.Printf("[runner] WARNING: could not check %s against the bridge, running the copy on disk, which may be out of date: %v", resolved, err)
+				}
 			}
-			fetched, ferr := r.fetchBin(spawn.Harness)
-			if ferr != nil {
-				return fmt.Errorf("binary not found on PATH: %s; auto-fetch failed: %w", bin, ferr)
-			}
-			log.Printf("[runner] fetched missing wrapper %s → %s", bin, fetched)
-			resolved = fetched
 		}
 		binPath = resolved
 	}
