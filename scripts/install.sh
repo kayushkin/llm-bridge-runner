@@ -357,6 +357,18 @@ fi
 # the shell. Same pattern llm-bridge.service uses on the host side.
 runner_path="$(echo "$PATH" | tr ':' '\n' | awk '!seen[$0]++' | paste -sd:)"
 
+# A unit's Environment= splits on spaces unless the assignment is quoted, and
+# WSL's PATH carries Windows folders like /mnt/c/Program Files/…; unquoted,
+# systemd cut PATH at the first space and dropped the rest. Inside the quotes
+# a backslash and a double quote are escaped, and % (a unit specifier) doubled.
+systemd_quoted_assignment() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//%/%%}"
+  printf '"%s"' "$value"
+}
+
 cat >"$unit_dir/llm-bridge-runner.service" <<EOF
 [Unit]
 Description=llm-bridge-runner (${machine_name})
@@ -366,8 +378,8 @@ ${runner_requires}
 
 [Service]
 Type=simple
-Environment=PATH=${runner_path}
-Environment=HOME=${home_dir}
+Environment=$(systemd_quoted_assignment "PATH=${runner_path}")
+Environment=$(systemd_quoted_assignment "HOME=${home_dir}")
 ExecStart=${runner_bin} run
 Restart=always
 RestartSec=5
