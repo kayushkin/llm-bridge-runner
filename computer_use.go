@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -22,7 +23,12 @@ import (
 // reports its path in the Hello; the bridge offers it to a session only where
 // the machine's owner has switched computer use on.
 //
-// Other systems report no tool from here. macOS is being built separately.
+// On macOS the tool is the darwin build, in ~/.local/bin beside the runner.
+// It drives the screen through screencapture and osascript, so the runner's
+// launchd agent needs Screen Recording and Accessibility, granted once on the
+// Mac (tested on MacBook, 2026-10-14; see the README).
+//
+// Other systems report no tool.
 
 const computerUseToolName = "computer-use" // its /api/runner/binary name
 
@@ -30,18 +36,14 @@ const computerUseToolName = "computer-use" // its /api/runner/binary name
 // computer-use tool and describes it, or returns nil with no error on a
 // machine that has none.
 func installCurrentComputerUseTool(serverURL string) (*msg.ComputerUseTool, error) {
-	if !runningInWSLWithInterop() {
-		return nil, nil
+	command, goos, goarch, err := computerUseToolLocation()
+	if err != nil || command == "" {
+		return nil, err
 	}
-	localAppData, err := windowsLocalAppDataInWSL()
+	endpoint, err := buildBinaryURLFor(serverURL, computerUseToolName, goos, goarch)
 	if err != nil {
 		return nil, err
 	}
-	endpoint, err := buildBinaryURLFor(serverURL, computerUseToolName, "windows", "amd64")
-	if err != nil {
-		return nil, err
-	}
-	command := filepath.Join(localAppData, "llm-bridge", "llm-bridge-computer-use.exe")
 	if _, err := installCurrentBinary(endpoint, command); err != nil {
 		return nil, fmt.Errorf("install the computer-use tool at %s: %w", command, err)
 	}
@@ -50,6 +52,26 @@ func installCurrentComputerUseTool(serverURL string) (*msg.ComputerUseTool, erro
 		return nil, err
 	}
 	return &msg.ComputerUseTool{Command: command, Version: version}, nil
+}
+
+// computerUseToolLocation is where this machine keeps its computer-use tool
+// and which build it is, or "" on a machine that has none.
+func computerUseToolLocation() (command, goos, goarch string, err error) {
+	switch {
+	case runtime.GOOS == "darwin":
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", "", "", err
+		}
+		return filepath.Join(home, ".local", "bin", "llm-bridge-computer-use"), "darwin", runtime.GOARCH, nil
+	case runningInWSLWithInterop():
+		localAppData, err := windowsLocalAppDataInWSL()
+		if err != nil {
+			return "", "", "", err
+		}
+		return filepath.Join(localAppData, "llm-bridge", "llm-bridge-computer-use.exe"), "windows", "amd64", nil
+	}
+	return "", "", "", nil
 }
 
 // runningInWSLWithInterop reports whether this is WSL and Windows programs can
