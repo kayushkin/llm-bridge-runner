@@ -36,6 +36,14 @@ TARGETS=(
   "darwin arm64"
 )
 
+# The computer-use tool, served beside the runner as
+# llm-bridge-computer-use-<os>-<arch>. Windows only so far; Claude Code in
+# WSL starts the Windows build through interop.
+COMPUTER_USE_NAME="llm-bridge-computer-use"
+COMPUTER_USE_TARGETS=(
+  "windows amd64"
+)
+
 TMPDIR_BUILD="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR_BUILD"' EXIT
 
@@ -88,6 +96,17 @@ for t in "${TARGETS[@]}"; do
   check_provenance "$OUT" "$OS/$ARCH"
 done
 
+for t in "${COMPUTER_USE_TARGETS[@]}"; do
+  read -r OS ARCH <<< "$t"
+  OUT="$TMPDIR_BUILD/$COMPUTER_USE_NAME-$OS-$ARCH"
+  echo "==> Building $COMPUTER_USE_NAME $OS/$ARCH..."
+  GOOS="$OS" GOARCH="$ARCH" go build \
+    -ldflags "-X main.Version=$VERSION" \
+    -o "$OUT" "./cmd/$COMPUTER_USE_NAME"
+  echo "    $(ls -lh "$OUT" | awk '{print $5}')  $OUT"
+  check_provenance "$OUT" "$COMPUTER_USE_NAME $OS/$ARCH"
+done
+
 echo "==> Publishing to $ASSETS_DIR..."
 for t in "${TARGETS[@]}"; do
   read -r OS ARCH <<< "$t"
@@ -95,6 +114,11 @@ for t in "${TARGETS[@]}"; do
   DST="$ASSETS_DIR/$NAME-$OS-$ARCH"
   sudo install -m 0755 "$SRC" "$DST"
   echo "    -> $DST"
+done
+for t in "${COMPUTER_USE_TARGETS[@]}"; do
+  read -r OS ARCH <<< "$t"
+  sudo install -m 0755 "$TMPDIR_BUILD/$COMPUTER_USE_NAME-$OS-$ARCH" "$ASSETS_DIR/$COMPUTER_USE_NAME-$OS-$ARCH"
+  echo "    -> $ASSETS_DIR/$COMPUTER_USE_NAME-$OS-$ARCH"
 done
 
 echo "==> Done. version=$VERSION"
