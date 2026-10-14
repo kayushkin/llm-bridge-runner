@@ -109,6 +109,20 @@ for t in "${COMPUTER_USE_TARGETS[@]}"; do
   check_provenance "$OUT" "$COMPUTER_USE_NAME $OS/$ARCH"
 done
 
+# The launcher launchd starts on a Mac (cmd/llm-bridge-runner-launcher). The
+# installer fetches it only when a Mac has none, so a new build here reaches
+# only new installs; that is deliberate, since replacing it on a Mac costs
+# the owner the Screen Recording and Accessibility grants.
+LAUNCHER_NAME="llm-bridge-runner-launcher"
+LAUNCHER_TARGETS=("darwin arm64" "darwin amd64")
+for t in "${LAUNCHER_TARGETS[@]}"; do
+  read -r OS ARCH <<< "$t"
+  OUT="$TMPDIR_BUILD/$LAUNCHER_NAME-$OS-$ARCH"
+  echo "==> Building $LAUNCHER_NAME $OS/$ARCH..."
+  GOOS="$OS" GOARCH="$ARCH" go build -o "$OUT" "./cmd/$LAUNCHER_NAME"
+  check_provenance "$OUT" "$LAUNCHER_NAME $OS/$ARCH"
+done
+
 echo "==> Publishing to $ASSETS_DIR..."
 for t in "${TARGETS[@]}"; do
   read -r OS ARCH <<< "$t"
@@ -116,6 +130,11 @@ for t in "${TARGETS[@]}"; do
   DST="$ASSETS_DIR/$NAME-$OS-$ARCH"
   sudo install -m 0755 "$SRC" "$DST"
   echo "    -> $DST"
+done
+for t in "${LAUNCHER_TARGETS[@]}"; do
+  read -r OS ARCH <<< "$t"
+  sudo install -m 0755 "$TMPDIR_BUILD/$LAUNCHER_NAME-$OS-$ARCH" "$ASSETS_DIR/$LAUNCHER_NAME-$OS-$ARCH"
+  echo "    -> $ASSETS_DIR/$LAUNCHER_NAME-$OS-$ARCH"
 done
 for t in "${COMPUTER_USE_TARGETS[@]}"; do
   read -r OS ARCH <<< "$t"

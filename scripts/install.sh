@@ -386,7 +386,23 @@ if [[ "$os" == "darwin" ]]; then
       -o BatchMode=yes -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
       -o ServerAliveInterval=30 -o ServerAliveCountMax=3 "$ssh_target"
   fi
-  write_launch_agent "$runner_launch_label" "$runner_bin" run
+  # launchd starts a launcher that runs the runner, never the runner itself:
+  # macOS gives Screen Recording and Accessibility to the program launchd
+  # started and identifies an unsigned one by its file's hash, so grants
+  # given to the runner were lost at every runner update. The launcher is
+  # installed only when missing, because replacing it costs those grants.
+  launcher_bin="$bin_dir/llm-bridge-runner-launcher"
+  if [[ ! -x "$launcher_bin" ]]; then
+    launcher_tmp="$(mktemp)"
+    if ! curl -fsSL "${bridge_url%/}/api/runner/binary?name=runner-launcher&os=${os}&arch=${arch}" -o "$launcher_tmp"; then
+      echo "error: could not download the runner launcher" >&2
+      exit 1
+    fi
+    chmod +x "$launcher_tmp"
+    mv "$launcher_tmp" "$launcher_bin"
+    echo "installed $launcher_bin"
+  fi
+  write_launch_agent "$runner_launch_label" "$launcher_bin" run
   echo
   echo "launchd agents loaded. Logs:"
   echo "  tail -f ~/Library/Logs/$runner_launch_label.log"
@@ -394,6 +410,10 @@ if [[ "$os" == "darwin" ]]; then
     echo "  tail -f ~/Library/Logs/$tunnel_launch_label.log"
   fi
   echo "State: launchctl print $launchd_domain/$runner_launch_label | grep -E 'state|pid'"
+  echo
+  echo "For computer use, grant these once in System Settings → Privacy & Security,"
+  echo "to $launcher_bin (press ⌘⇧G in the file picker to type the path):"
+  echo "  Accessibility, and Screen Recording."
   exit 0
 fi
 
