@@ -144,6 +144,12 @@ func (d *macDesktop) screenSize() (int, int, error) {
 }
 
 func (d *macDesktop) screenshot() (*image.RGBA, error) {
+	// Declare the user active, which lights a display that went dark, before
+	// looking at it. Started, not waited for: caffeinate -u holds the
+	// assertion for its -t seconds and exits on its own.
+	if err := exec.Command("caffeinate", "-u", "-t", "2").Start(); err != nil {
+		return nil, fmt.Errorf("wake the display: %w", err)
+	}
 	directory, err := os.MkdirTemp("", "llm-bridge-computer-use-")
 	if err != nil {
 		return nil, err
