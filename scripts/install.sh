@@ -378,19 +378,13 @@ if [[ "$os" == "darwin" ]]; then
     launchctl bootstrap "$launchd_domain" "$plist"
   }
   mkdir -p "$launch_agent_dir" "$home_dir/Library/Logs"
-  # The install-time tunnel and the launchd tunnel can't both bind the port.
-  cleanup_install_tunnel
-  trap - EXIT
-  if [[ "$needs_tunnel" -eq 1 ]]; then
-    write_launch_agent "$tunnel_launch_label" /usr/bin/ssh -NL "${local_port}:localhost:${ssh_remote_port}" \
-      -o BatchMode=yes -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
-      -o ServerAliveInterval=30 -o ServerAliveCountMax=3 "$ssh_target"
-  fi
   # launchd starts a launcher that runs the runner, never the runner itself:
   # macOS gives Screen Recording and Accessibility to the program launchd
   # started and identifies an unsigned one by its file's hash, so grants
   # given to the runner were lost at every runner update. The launcher is
   # installed only when missing, because replacing it costs those grants.
+  # It downloads here, before the tunnel agent below is restarted: through a
+  # tunnel that is still coming back the download fails (MacBook, 2026-10-14).
   launcher_bin="$bin_dir/llm-bridge-runner-launcher"
   if [[ ! -x "$launcher_bin" ]]; then
     launcher_tmp="$(mktemp)"
@@ -401,6 +395,14 @@ if [[ "$os" == "darwin" ]]; then
     chmod +x "$launcher_tmp"
     mv "$launcher_tmp" "$launcher_bin"
     echo "installed $launcher_bin"
+  fi
+  # The install-time tunnel and the launchd tunnel can't both bind the port.
+  cleanup_install_tunnel
+  trap - EXIT
+  if [[ "$needs_tunnel" -eq 1 ]]; then
+    write_launch_agent "$tunnel_launch_label" /usr/bin/ssh -NL "${local_port}:localhost:${ssh_remote_port}" \
+      -o BatchMode=yes -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=3 "$ssh_target"
   fi
   write_launch_agent "$runner_launch_label" "$launcher_bin" run
   echo
