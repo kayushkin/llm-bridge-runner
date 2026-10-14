@@ -84,6 +84,14 @@ sudo loginctl enable-linger $USER              # survive logout
 
 When the bridge endpoint is an SSH target, a second unit `llm-bridge-tunnel.service` keeps the SSH tunnel alive; the runner has `Requires=llm-bridge-tunnel.service`.
 
+## Computer use
+
+`cmd/llm-bridge-computer-use` is an MCP server, over stdio, with one tool, `computer`: screenshots of the main display, scaled to fit 1280×800, and mouse and keyboard actions in the shape of Anthropic's computer tool. `deploy.sh` publishes it beside the runner as `llm-bridge-computer-use-<os>-<arch>` for windows/amd64 and darwin/{arm64,amd64}. Fetch it with `/api/runner/binary?name=computer-use&os=…&arch=…`.
+
+- **Name the MCP server anything but `computer-use`.** Claude Code reserves that name and skips such a server with only a debug-log warning. `bridge-computer-use` works.
+- **macOS** uses `screencapture` and `osascript`, with no cgo. A launchd-started runner is the app macOS asks about, and it needs three grants, given once on the Mac: Screen Recording, Accessibility (System Settings → Privacy & Security → Accessibility → + → `~/.local/bin/llm-bridge-runner`; without it: "osascript is not allowed to send keystrokes (1002)"), and the "bypass the system private window picker" dialog that appears on the first capture. The binaries are not signed, so an update may need the grants again. Proven on MacBook, 2026-10-14 (br_1792019214241724555).
+- **Windows** uses SendInput and BitBlt. Claude Code in WSL runs the `.exe` through interop, in the Windows session WSL was started from. Not yet tested on a real Windows desktop.
+
 ## Part of the llm-bridge ecosystem
 
 See [llm-bridge](https://github.com/kayushkin/llm-bridge) for the canonical message types and the full architecture.
