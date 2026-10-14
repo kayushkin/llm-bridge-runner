@@ -31,6 +31,16 @@ The installer prompts for two things:
 
 The installer downloads a prebuilt binary (linux/{amd64,arm64}, darwin/{amd64,arm64}) from the bridge server's `/api/runner/binary` endpoint, enrolls the machine, and starts a systemd user unit (`llm-bridge-runner.service`).
 
+### In WSL
+
+WSL stops its Linux VM soon after the last terminal closes, taking the runner with it. Run this inside the distro instead of `install.sh`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kayushkin/llm-bridge-runner/main/scripts/wsl-setup.sh | bash
+```
+
+It makes sure systemd and linger are on, registers a hidden Windows logon task that holds the distro open, and then runs `install.sh` (updating in place from the saved config, or enrolling when given `--endpoint` and `--passphrase`).
+
 ## Mint a passphrase (server side)
 
 On the host running llm-bridge-server:
