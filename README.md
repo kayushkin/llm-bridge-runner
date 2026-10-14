@@ -29,7 +29,7 @@ The installer prompts for two things:
 1. **bridge endpoint** — either a public URL (`https://bridge.example.com`) or an SSH target (`user@host[:remote-port]`). For SSH targets, the installer also installs a persistent `ssh -NL` tunnel as a systemd user service so the runner can reach `localhost:8160` without a public DNS name.
 2. **enrollment passphrase** — single-use, minted on the server with `llm-bridge-server mint-enroll`. Trades for a durable per-machine token stored at `~/.config/llm-bridge-runner/config.json`.
 
-The installer downloads a prebuilt binary (linux/{amd64,arm64}, darwin/{amd64,arm64}) from the bridge server's `/api/runner/binary` endpoint, enrolls the machine, and starts a systemd user unit (`llm-bridge-runner.service`).
+The installer downloads a prebuilt binary (linux/{amd64,arm64}, darwin/{amd64,arm64}) from the bridge server's `/api/runner/binary` endpoint, enrolls the machine, and starts the runner as a service: a systemd user unit (`llm-bridge-runner.service`) on Linux, a launchd agent (`com.kayushkin.llm-bridge-runner`, logs in `~/Library/Logs/`) on macOS. An SSH endpoint gets a second unit or agent for the tunnel.
 
 ### In WSL
 

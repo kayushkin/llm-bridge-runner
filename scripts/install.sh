@@ -102,6 +102,10 @@ tunnel_unit="$home_dir/.config/systemd/user/llm-bridge-tunnel.service"
 update_mode=0
 if [[ -f "$config_file" && "${force_enroll:-0}" -ne 1 ]]; then
   read_field() {
+    if ! command -v python3 >/dev/null 2>&1 && command -v plutil >/dev/null 2>&1; then
+      plutil -extract "$1" raw -o - "$config_file" 2>/dev/null || true
+      return
+    fi
     python3 - "$config_file" "$1" <<'PY' 2>/dev/null || true
 import json, sys
 path, key = sys.argv[1], sys.argv[2]
@@ -218,12 +222,21 @@ cleanup_install_tunnel() {
 }
 trap cleanup_install_tunnel EXIT
 
+# ss is Linux's; macOS has lsof.
+local_port_is_listening() {
+  if [[ "$os" == "darwin" ]]; then
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+  else
+    ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$1\$"
+  fi
+}
+
 if [[ "$needs_tunnel" -eq 1 ]]; then
   # Whatever's bound to $local_port — reuse it if it actually proxies to
   # a healthy bridge (typical case: the persistent llm-bridge-tunnel
   # service is up from a previous install). Otherwise refuse loudly so
   # we don't silently talk to the wrong service.
-  if ss -tln 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${local_port}\$"; then
+  if local_port_is_listening "$local_port"; then
     if curl -fsS -o /dev/null --max-time 3 "${bridge_url}/health"; then
       echo "reusing existing tunnel on localhost:${local_port}"
       needs_install_tunnel=0
@@ -277,6 +290,13 @@ fi
 # Stop the running service before clobbering its binary. Otherwise the
 # rename below races and ELF reload can leave a half-running daemon.
 service_was_active=0
+launch_agent_dir="$home_dir/Library/LaunchAgents"
+tunnel_launch_label="com.kayushkin.llm-bridge-tunnel"
+runner_launch_label="com.kayushkin.llm-bridge-runner"
+launchd_domain="gui/$(id -u)"
+if [[ "$update_mode" -eq 1 && "$os" == "darwin" ]]; then
+  launchctl bootout "$launchd_domain/$runner_launch_label" 2>/dev/null || true
+fi
 if [[ "$update_mode" -eq 1 ]] && command -v systemctl >/dev/null 2>&1; then
   if systemctl --user is-active --quiet llm-bridge-runner.service; then
     systemctl --user stop llm-bridge-runner.service || true
@@ -309,13 +329,77 @@ fi
 # Configure systemd user units
 # ──────────────────────────────────────────────────────────────────────
 
-if [[ "$os" != "linux" ]]; then
+# Capture the user's interactive PATH so harnesses spawned by the runner
+# can find tools installed under nvm/npm-global/cargo/homebrew/etc. Without
+# this, a service gets a minimal default PATH and `claude`, `node`, `npm`, …
+# come back ENOENT even though `which claude` works in the shell. Same
+# pattern llm-bridge.service uses on the host side. (`paste -` because
+# macOS's paste needs the operand.)
+runner_path="$(echo "$PATH" | tr ':' '\n' | awk '!seen[$0]++' | paste -sd: -)"
+
+if [[ "$os" == "darwin" ]]; then
+  # launchd agents in the user's GUI session: they start at login, restart
+  # when they exit, and — unlike a daemon — can reach the screen, which
+  # computer use will need.
+  xml_escaped() {
+    local value="$1"
+    # Quoted replacements: in bash 5.2 a bare & there means the matched text.
+    value="${value//&/"&amp;"}"
+    value="${value//</"&lt;"}"
+    value="${value//>/"&gt;"}"
+    printf '%s' "$value"
+  }
+  write_launch_agent() {
+    local label="$1" plist="$launch_agent_dir/$1.plist" argument
+    shift
+    {
+      printf '<?xml version="1.0" encoding="UTF-8"?>\n'
+      printf '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+      printf '<plist version="1.0">\n<dict>\n'
+      printf '  <key>Label</key><string>%s</string>\n' "$(xml_escaped "$label")"
+      printf '  <key>ProgramArguments</key>\n  <array>\n'
+      for argument in "$@"; do
+        printf '    <string>%s</string>\n' "$(xml_escaped "$argument")"
+      done
+      printf '  </array>\n'
+      printf '  <key>EnvironmentVariables</key>\n  <dict>\n'
+      printf '    <key>PATH</key><string>%s</string>\n' "$(xml_escaped "$runner_path")"
+      printf '    <key>HOME</key><string>%s</string>\n' "$(xml_escaped "$home_dir")"
+      printf '  </dict>\n'
+      printf '  <key>RunAtLoad</key><true/>\n'
+      printf '  <key>KeepAlive</key><true/>\n'
+      printf '  <key>ThrottleInterval</key><integer>5</integer>\n'
+      printf '  <key>StandardOutPath</key><string>%s</string>\n' "$(xml_escaped "$home_dir/Library/Logs/$label.log")"
+      printf '  <key>StandardErrorPath</key><string>%s</string>\n' "$(xml_escaped "$home_dir/Library/Logs/$label.log")"
+      printf '</dict>\n</plist>\n'
+    } >"$plist"
+    plutil -lint "$plist" >/dev/null
+    launchctl bootout "$launchd_domain/$label" 2>/dev/null || true
+    launchctl bootstrap "$launchd_domain" "$plist"
+  }
+  mkdir -p "$launch_agent_dir" "$home_dir/Library/Logs"
+  # The install-time tunnel and the launchd tunnel can't both bind the port.
+  cleanup_install_tunnel
+  trap - EXIT
   if [[ "$needs_tunnel" -eq 1 ]]; then
-    echo "non-linux OS: install a tunnel manager yourself, then run: $runner_bin"
-  else
-    echo "non-linux OS: run: $runner_bin"
+    write_launch_agent "$tunnel_launch_label" /usr/bin/ssh -NL "${local_port}:localhost:${ssh_remote_port}" \
+      -o BatchMode=yes -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new \
+      -o ServerAliveInterval=30 -o ServerAliveCountMax=3 "$ssh_target"
   fi
+  write_launch_agent "$runner_launch_label" "$runner_bin" run
+  echo
+  echo "launchd agents loaded. Logs:"
+  echo "  tail -f ~/Library/Logs/$runner_launch_label.log"
+  if [[ "$needs_tunnel" -eq 1 ]]; then
+    echo "  tail -f ~/Library/Logs/$tunnel_launch_label.log"
+  fi
+  echo "State: launchctl print $launchd_domain/$runner_launch_label | grep -E 'state|pid'"
   exit 0
+fi
+
+if [[ "$os" != "linux" ]]; then
+  echo "unsupported OS $os: run $runner_bin run under your own service manager" >&2
+  exit 1
 fi
 
 if ! command -v systemctl >/dev/null 2>&1; then
@@ -350,12 +434,6 @@ EOF
   runner_requires="Requires=llm-bridge-tunnel.service"
 fi
 
-# Capture the user's interactive PATH so harnesses spawned by the runner
-# can find tools installed under nvm/npm-global/cargo/etc. Without this,
-# systemd user services get a minimal default PATH and `claude`,
-# `node`, `npm`, … come back ENOENT even though `which claude` works in
-# the shell. Same pattern llm-bridge.service uses on the host side.
-runner_path="$(echo "$PATH" | tr ':' '\n' | awk '!seen[$0]++' | paste -sd:)"
 
 # A unit's Environment= splits on spaces unless the assignment is quoted, and
 # WSL's PATH carries Windows folders like /mnt/c/Program Files/…; unquoted,
