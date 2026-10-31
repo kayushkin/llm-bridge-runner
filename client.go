@@ -43,10 +43,11 @@ const (
 // to llm-bridge-server. On disconnect it kills all in-flight subprocesses
 // and reconnects with exponential backoff.
 type Client struct {
-	cfg      *Config
-	outgoing chan *msg.RunnerMessage
-	registry *SubprocessRegistry
-	services *ServiceRegistry
+	cfg           *Config
+	outgoing      chan *msg.RunnerMessage
+	registry      *SubprocessRegistry
+	services      *ServiceRegistry
+	oauthRecovery *ClaudeOAuthRecovery
 
 	// Seeded context state. machineID is set once per Welcome and reused
 	// across reconciliations; reconcilers run in the background for each
@@ -64,11 +65,12 @@ func NewClient(cfg *Config) *Client {
 	}
 	services := NewServiceRegistry()
 	c := &Client{
-		cfg:         cfg,
-		outgoing:    outgoing,
-		services:    services,
-		registry:    NewSubprocessRegistry(outgoing, installCurrent, cfg.ServerURL, services),
-		reconcilers: make(map[msg.SeedSource]*SeedReconciler),
+		cfg:           cfg,
+		outgoing:      outgoing,
+		services:      services,
+		registry:      NewSubprocessRegistry(outgoing, installCurrent, cfg.ServerURL, services),
+		oauthRecovery: NewClaudeOAuthRecovery(outgoing),
+		reconcilers:   make(map[msg.SeedSource]*SeedReconciler),
 	}
 	c.initReconcilers()
 	return c
@@ -359,6 +361,21 @@ func (c *Client) reader(conn *websocket.Conn) error {
 			// drives a full reconcile and the manifest endpoint is the
 			// source of truth for what to apply. Ignore but log for debug.
 			log.Printf("[runner] seed_delta received (unused in v1)")
+		case msg.RunnerMsgClaudeOAuthRecovery:
+			if m.ClaudeOAuthRecovery == nil {
+				log.Printf("[runner] invalid Claude OAuth recovery message")
+				continue
+			}
+			switch m.ClaudeOAuthRecovery.Action {
+			case "start":
+				go c.oauthRecovery.Start(m.ClaudeOAuthRecovery.RecoveryID)
+			case "code":
+				if err := c.oauthRecovery.SubmitCode(m.ClaudeOAuthRecovery.RecoveryID, m.ClaudeOAuthRecovery.Code); err != nil {
+					c.oauthRecovery.Failed(m.ClaudeOAuthRecovery.RecoveryID, err)
+				}
+			default:
+				log.Printf("[runner] invalid Claude OAuth recovery action: %s", m.ClaudeOAuthRecovery.Action)
+			}
 		default:
 			log.Printf("[runner] unexpected message type: %s", m.Type)
 		}
