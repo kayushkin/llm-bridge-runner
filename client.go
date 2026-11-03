@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/kayushkin/llm-bridge/machinestats"
 	"github.com/kayushkin/llm-bridge/msg"
 )
 
@@ -49,6 +50,10 @@ type Client struct {
 	services      *ServiceRegistry
 	oauthRecovery *ClaudeOAuthRecovery
 
+	// machineStatsCollector keeps CPU counters between readings, so it lives
+	// across connections.
+	machineStatsCollector *machinestats.Collector
+
 	// Seeded context state. machineID is set once per Welcome and reused
 	// across reconciliations; reconcilers run in the background for each
 	// configured seed source (agent-store, skill-store).
@@ -71,6 +76,8 @@ func NewClient(cfg *Config) *Client {
 		registry:      NewSubprocessRegistry(outgoing, installCurrent, cfg.ServerURL, services),
 		oauthRecovery: NewClaudeOAuthRecovery(outgoing),
 		reconcilers:   make(map[msg.SeedSource]*SeedReconciler),
+
+		machineStatsCollector: machinestats.NewCollector(),
 	}
 	c.initReconcilers()
 	return c
@@ -276,6 +283,7 @@ func (c *Client) runOnce(ctx context.Context) error {
 	// the server reads garbage until its read deadline expires.
 	writeErr := make(chan error, 1)
 	go c.writer(connCtx, conn, pingInterval, writeErr)
+	go c.sendMachineStatsWhileConnected(connCtx)
 
 	readErr := c.reader(conn)
 

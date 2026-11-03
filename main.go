@@ -34,6 +34,9 @@ func main() {
 		case "run":
 			runService(os.Args[2:])
 			return
+		case "machine-stats":
+			printMachineStats()
+			return
 		case "-version":
 			fmt.Println(Version)
 			return
@@ -52,6 +55,9 @@ func usage() {
 
   llm-bridge-runner [run]
       Read the saved config and run the WS client (default).
+
+  llm-bridge-runner machine-stats
+      Print one reading of this machine's health, as the bridge receives it.
 
   llm-bridge-runner -version
       Print version.`)
