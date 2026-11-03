@@ -137,10 +137,10 @@ func newStrategy(source msg.SeedSource, cfg *Config) (seedStrategy, error) {
 // because it is the very same directory — and two independent resolutions of one
 // path is how a sandboxed run leaks into the live tree.
 //
-// They did not agree. configPath() honours $LLMBRIDGE_RUNNER_CONFIG and
+// They did not agree. configPath() honors $LLMBRIDGE_RUNNER_CONFIG and
 // $XDG_CONFIG_HOME; this function used user.Current().HomeDir, which reads
 // /etc/passwd and therefore ignores $HOME entirely. So a test or a smoke could
-// redirect the config file into a sandbox, watch the runner honour it, and still
+// redirect the config file into a sandbox, watch the runner honor it, and still
 // have the seed reconciler create and write ~/.config/llm-bridge-runner in the
 // real home — silently, on every NewClient().
 func sidecarDir() (string, error) {

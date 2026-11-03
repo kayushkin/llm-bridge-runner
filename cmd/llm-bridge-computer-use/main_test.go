@@ -167,7 +167,7 @@ func TestScaleRoundTripsAndKeepsSmallScreens(t *testing.T) {
 		t.Errorf("far corner -> %d,%d", x, y)
 	}
 	if x, y := s.toScreenshot(960, 540); x != 640 || y != 360 {
-		t.Errorf("centre -> %d,%d", x, y)
+		t.Errorf("center -> %d,%d", x, y)
 	}
 	if s := newScreenScale(1024, 768); s.screenshotWidth != 1024 || s.screenshotHeight != 768 {
 		t.Errorf("a small screen was scaled: %dx%d", s.screenshotWidth, s.screenshotHeight)

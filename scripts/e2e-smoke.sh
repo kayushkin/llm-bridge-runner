@@ -70,7 +70,7 @@ TMP_DIR="$(mktemp -d -t runner-e2e.XXXXXX)"
 BIN_DIR="$TMP_DIR/bin"
 SANDBOX_HOME="$TMP_DIR/home"
 BIN="$BIN_DIR/$BIN_NAME"
-# Where the runner under test is told to keep its config. Honoured via
+# Where the runner under test is told to keep its config. Honored via
 # $LLMBRIDGE_RUNNER_CONFIG (config.go:configPath). Deliberately a path the
 # default could never produce, so assertion 6 can only pass if the override is
 # actually read — a hermeticity fix is only real if the test stops relying on
@@ -107,21 +107,21 @@ fi
 check_live_config_untouched() {
   # Runs on EVERY exit path. Two distinct leaks to catch: overwriting an existing
   # config (the token is replaced) and CREATING one where there was none (a
-  # phantom enrolment). Both mean $LLMBRIDGE_RUNNER_CONFIG was not honoured.
+  # phantom enrolment). Both mean $LLMBRIDGE_RUNNER_CONFIG was not honored.
   if [ "$LIVE_CONFIG_EXISTED" = "1" ]; then
     local after
     after="$(sha256sum "$LIVE_CONFIG" 2>/dev/null | cut -d' ' -f1 || true)"
     if [ "$LIVE_CONFIG_BEFORE" != "$after" ]; then
       echo "" >&2
       echo "!!! THIS SMOKE MODIFIED THE LIVE RUNNER CONFIG $LIVE_CONFIG" >&2
-      echo "!!! \$LLMBRIDGE_RUNNER_CONFIG was not honoured. That file holds the" >&2
+      echo "!!! \$LLMBRIDGE_RUNNER_CONFIG was not honored. That file holds the" >&2
       echo "!!! durable bearer token this machine authenticates with." >&2
       return 1
     fi
   elif [ -e "$LIVE_CONFIG" ]; then
     echo "" >&2
     echo "!!! THIS SMOKE CREATED A LIVE RUNNER CONFIG AT $LIVE_CONFIG" >&2
-    echo "!!! \$LLMBRIDGE_RUNNER_CONFIG was not honoured, so the sandboxed enrol" >&2
+    echo "!!! \$LLMBRIDGE_RUNNER_CONFIG was not honored, so the sandboxed enrol" >&2
     echo "!!! wrote a real one. Delete it — it is a phantom machine identity." >&2
     return 1
   fi
@@ -181,7 +181,7 @@ CGO_ENABLED=0 go build -o "$BIN" . || fail "go build failed"
 
 # ---------------------------------------------------------------------------
 step "write the stub llm-bridge-server"
-# Speaks exactly one route: POST /api/runner/enroll. Behaviour is selected by the
+# Speaks exactly one route: POST /api/runner/enroll. Behavior is selected by the
 # path prefix so a single process can serve the happy path and the 500 case
 # without a restart. Records every request body so the payload shape can be
 # asserted rather than assumed.
@@ -359,7 +359,7 @@ step "6. \`enroll\` happy path writes a 0600 config with the server's fields"
 ENROLL_OUT="$(run_runner enroll --server "$STUB_BASE" --passphrase "pw" --name "smoke-machine" 2>&1)" \
   || fail "happy-path enroll exited non-zero: $ENROLL_OUT"
 
-[ -f "$SANDBOX_CONFIG" ] || fail "successful enrol wrote no config at \$LLMBRIDGE_RUNNER_CONFIG ($SANDBOX_CONFIG) — the override is not honoured"
+[ -f "$SANDBOX_CONFIG" ] || fail "successful enrol wrote no config at \$LLMBRIDGE_RUNNER_CONFIG ($SANDBOX_CONFIG) — the override is not honored"
 
 # The file holds a durable bearer token. config.go says "file mode 0600 —
 # sensitive". Assert the mode, not the comment.
@@ -455,7 +455,7 @@ SIDECAR_DIR="$(dirname "$TMP_DIR/closed-port-config.json")"
 # what protects the live tree: configPath() falls back to user.Current().HomeDir,
 # which ignores $HOME entirely, so a leak lands in the REAL home rather than here.
 # That case is caught by check_live_config_untouched, from the trap, on every exit
-# path. This one only catches a NEW path that does honour $HOME.
+# path. This one only catches a NEW path that does honor $HOME.
 if [ -n "$(ls -A "$SANDBOX_HOME" 2>/dev/null)" ]; then
   fail "the runner wrote to the sandboxed \$HOME: $(ls -A "$SANDBOX_HOME")"
 fi

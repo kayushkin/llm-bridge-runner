@@ -150,7 +150,7 @@ func (d windowsDesktop) screenshot() (*image.RGBA, error) {
 		planes: 1, bitCount: 32, compression: biRGB,
 	}
 	header.size = uint32(unsafe.Sizeof(header))
-	// BITMAPINFO is the header plus a colour table, unused at 32 bits per pixel.
+	// BITMAPINFO is the header plus a color table, unused at 32 bits per pixel.
 	bitmapInfo := struct {
 		header bitmapInfoHeader
 		colors [4]byte

@@ -32,12 +32,12 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// TestRunKillsManagedServicesWhenCancelledDuringBackoff pins the shutdown
+// TestRunKillsManagedServicesWhenCanceledDuringBackoff pins the shutdown
 // contract at the one moment it used to be violated.
 //
-// Run has two return paths. The one taken when the context is cancelled while
+// Run has two return paths. The one taken when the context is canceled while
 // runOnce is in flight killed the subprocess registry AND the managed services.
-// The one taken when the context is cancelled during the reconnect backoff
+// The one taken when the context is canceled during the reconnect backoff
 // returned without touching the services at all — so every managed daemon the
 // runner had started outlived it. That is not an edge case: the backoff is
 // exactly where the runner sits for as long as the server is unreachable, which
@@ -46,7 +46,7 @@ func (b *syncBuffer) String() string {
 // The test asserts the property directly — the service process must actually be
 // dead — rather than checking the shutdown log line, which is a proxy that a
 // future refactor could keep printing while dropping the kill.
-func TestRunKillsManagedServicesWhenCancelledDuringBackoff(t *testing.T) {
+func TestRunKillsManagedServicesWhenCanceledDuringBackoff(t *testing.T) {
 	// NewClient builds the seed reconcilers, which MkdirAll their sidecar
 	// directory. Point the config path at the test's scratch dir first: without
 	// this, that directory resolves into the developer's REAL ~/.config and the
@@ -128,7 +128,7 @@ func TestRunKillsManagedServicesWhenCancelledDuringBackoff(t *testing.T) {
 	case <-serviceExited:
 		// Killed, as it must be.
 	case <-time.After(10 * time.Second):
-		t.Fatal("Run returned but the managed service is STILL RUNNING: cancelling " +
+		t.Fatal("Run returned but the managed service is STILL RUNNING: canceling " +
 			"during the reconnect backoff orphaned it. Every daemon the runner " +
 			"started outlives the runner itself.")
 	}
@@ -142,7 +142,7 @@ func TestRunKillsManagedServicesWhenCancelledDuringBackoff(t *testing.T) {
 // config file's directory, because they ARE the same directory and used to be
 // resolved two different ways.
 //
-// configPath() honours $LLMBRIDGE_RUNNER_CONFIG; sidecarDir() used
+// configPath() honors $LLMBRIDGE_RUNNER_CONFIG; sidecarDir() used
 // user.Current().HomeDir, which reads /etc/passwd and ignores $HOME. Anything
 // that redirected the config into a sandbox — a test, the e2e smoke, an
 // operator — still had the seed reconciler create and write the real

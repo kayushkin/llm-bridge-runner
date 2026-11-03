@@ -123,12 +123,12 @@ func (c *Client) triggerSeed(source msg.SeedSource) {
 	}
 }
 
-// Run drives the connect-and-serve loop until the context is cancelled.
+// Run drives the connect-and-serve loop until the context is canceled.
 // Each iteration attempts one connection; on disconnect, in-flight
 // subprocesses are killed and the loop redials after a backoff.
 //
 // Teardown is deferred rather than written at each return, because Run has
-// two of them and they used to disagree: cancelling during the reconnect
+// two of them and they used to disagree: canceling during the reconnect
 // backoff — where the runner spends its whole life whenever the server is
 // unreachable — returned without killing the managed services, orphaning
 // every one of them. A defer makes the teardown a property of leaving Run
@@ -167,7 +167,7 @@ func (c *Client) Run(ctx context.Context) {
 
 // runOnce establishes one WebSocket connection, performs the Hello/Welcome
 // handshake, then runs the read+write loops until the connection dies or
-// the context is cancelled. Returns the disconnect cause (nil if cancelled).
+// the context is canceled. Returns the disconnect cause (nil if canceled).
 func (c *Client) runOnce(ctx context.Context) error {
 	wsURL, err := buildWSURL(c.cfg.ServerURL)
 	if err != nil {
