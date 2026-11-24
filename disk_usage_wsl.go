@@ -61,7 +61,7 @@ func isWSLPath(path string) bool { return strings.HasPrefix(path, "/") }
 
 // wslDrive describes the WSL file system as a drive.
 func wslDrive() (msg.DiskUsageDrive, error) {
-	total, free, err := filesystemSize(wslRootPath)
+	total, free, _, err := filesystemSize(wslRootPath)
 	if err != nil {
 		return msg.DiskUsageDrive{}, err
 	}
@@ -92,7 +92,7 @@ func wslDisks(command string) ([]msg.DiskUsageWSLDisk, error) {
 	if err != nil {
 		return nil, err
 	}
-	total, free, err := filesystemSize(wslRootPath)
+	total, _, used, err := filesystemSize(wslRootPath)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +100,7 @@ func wslDisks(command string) ([]msg.DiskUsageWSLDisk, error) {
 		if disks[i].Distribution == own {
 			disks[i].RunnerRunsInIt = true
 			disks[i].FilesystemTotalBytes = total
-			disks[i].FilesystemUsedBytes = total - free
+			disks[i].FilesystemUsedBytes = used
 		}
 	}
 	return disks, nil
