@@ -7,6 +7,10 @@
 //	llm-bridge-disk-usage -version
 //	llm-bridge-disk-usage drives                 JSON list of fixed drives
 //	llm-bridge-disk-usage wsl-disks              JSON list of WSL distributions' disk files and their sizes
+//	llm-bridge-disk-usage wsl-compaction-status  JSON: is compaction set up, and how the last run went
+//	llm-bridge-disk-usage wsl-compaction-set-up <distribution>
+//	                                             shows the UAC prompt that sets compaction up (package wslcompact)
+//	llm-bridge-disk-usage wsl-compaction-start   starts the elevated task, which shuts WSL down in ten seconds
 //	llm-bridge-disk-usage scan C:                JSON tree on stdout; "progress <entries> <bytes>" lines on stderr
 //	llm-bridge-disk-usage check <path> <kind>    JSON verdict: may it be deleted?
 //	llm-bridge-disk-usage delete <path> <kind>   JSON verdict line, then, if allowed, deletes and prints a JSON result line;
@@ -24,6 +28,7 @@ import (
 	"time"
 
 	"github.com/kayushkin/llm-bridge-runner/internal/diskusage"
+	"github.com/kayushkin/llm-bridge-runner/internal/diskusage/wslcompact"
 	"github.com/kayushkin/llm-bridge/msg"
 )
 
@@ -55,6 +60,20 @@ func main() {
 			fail("list WSL disks: %v", err)
 		}
 		printJSON(disks)
+	case command == "wsl-compaction-status" && len(os.Args) == 2:
+		printJSON(wslcompact.Status())
+	case command == "wsl-compaction-set-up" && len(os.Args) == 3:
+		if err := wslcompact.RequestSetUp(os.Args[2]); err != nil {
+			fail("%v", err)
+		}
+	case command == wslcompact.SetUpCommand && len(os.Args) == 3:
+		if err := wslcompact.SetUpElevated(os.Args[2]); err != nil {
+			fail("set up WSL compaction: %v", err)
+		}
+	case command == "wsl-compaction-start" && len(os.Args) == 2:
+		if err := wslcompact.Start(); err != nil {
+			fail("%v", err)
+		}
 	case command == "scan" && len(os.Args) == 3:
 		scan(os.Args[2])
 	case command == "check" && len(os.Args) == 4:

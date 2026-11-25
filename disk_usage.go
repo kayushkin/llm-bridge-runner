@@ -87,6 +87,8 @@ type DiskUsage struct {
 	command  string // the helper; "" when this runner has none
 	scans    map[string]*driveScan
 	deletion *msg.DiskUsageDeletion // running now, or the last one
+
+	compactionSetUp wslCompactionSetUp
 }
 
 type driveScan struct {
@@ -142,6 +144,18 @@ func (d *DiskUsage) answer(request *msg.DiskUsageRequest) (*msg.DiskUsageAnswer,
 		return &msg.DiskUsageAnswer{DeletionCheck: check}, err
 	case msg.DiskUsageActionDelete:
 		return d.startDeletion(command, request)
+	case msg.DiskUsageActionSetUpWSLCompaction:
+		if err := d.setUpWSLCompaction(command); err != nil {
+			return nil, err
+		}
+		status, err := d.status(command)
+		return &msg.DiskUsageAnswer{Status: status}, err
+	case msg.DiskUsageActionCompactWSL:
+		if err := d.startWSLCompaction(command); err != nil {
+			return nil, err
+		}
+		status, err := d.status(command)
+		return &msg.DiskUsageAnswer{Status: status}, err
 	}
 	return nil, fmt.Errorf("unknown disk-usage action %q", request.Action)
 }
@@ -168,6 +182,13 @@ func (d *DiskUsage) status(command string) (*msg.DiskUsageStatus, error) {
 		status.Errors = append(status.Errors, err.Error())
 	} else {
 		status.WSLDisks = disks
+		if len(disks) > 0 {
+			if compaction, err := d.wslCompactionStatus(command); err != nil {
+				status.Errors = append(status.Errors, err.Error())
+			} else {
+				status.WSLCompaction = compaction
+			}
+		}
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
